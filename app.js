@@ -3,8 +3,8 @@
   "use strict";
 
   const PROCESSING_WIDTH = 720;
-  const AUTO_CAPTURE_STABLE_FRAMES = 5;
-  const DETECTION_INTERVAL = 180;
+  const AUTO_CAPTURE_STABLE_FRAMES = 3;
+  const DETECTION_INTERVAL = 130;
   const PAGE_REMOVED_DELAY = 650;
   const PAGE_CHANGE_DELAY = 900;
   const DPI = 200;
@@ -297,7 +297,9 @@
             const rotatedRect = cv.minAreaRect(contour);
             const rotatedArea = rotatedRect.size.width * rotatedRect.size.height;
             const rectangularity = rotatedArea ? contourArea / rotatedArea : 0;
-            if (rectangularity > .58) {
+            // A page with one weak or missing edge still produces a 3-6 side contour.
+            // The rotated rectangle supplies the missing corner for a fast, usable crop.
+            if (approximation.rows >= 3 && approximation.rows <= 6 && rectangularity > .32) {
               const box = cv.boxPoints(rotatedRect);
               points = normalizedPointsFromMat(box, canvas, true);
               box.delete();
@@ -401,7 +403,7 @@
     lastPageSeenAt = Date.now();
     stableCorners.push(corners);
     if (stableCorners.length > AUTO_CAPTURE_STABLE_FRAMES) stableCorners.shift();
-    const stable = stableCorners.length === AUTO_CAPTURE_STABLE_FRAMES && averageCornerMovement(stableCorners) < .012;
+    const stable = stableCorners.length === AUTO_CAPTURE_STABLE_FRAMES && averageCornerMovement(stableCorners) < .008;
     drawOutline(corners, stable && !requiresPageChange);
     if (requiresPageChange) {
       elements.status.textContent = "Move the page away, then show the next one.";
@@ -449,7 +451,7 @@
   }
 
   function canvasToBlob(canvas) {
-    return new Promise(function (resolve) { canvas.toBlob(resolve, "image/jpeg", .88); });
+    return new Promise(function (resolve) { canvas.toBlob(resolve, "image/png"); });
   }
 
   async function capturePage(corners) {
@@ -466,6 +468,7 @@
       const source = cv.imread(sourceCanvas);
       const warped = new cv.Mat();
       const gray = new cv.Mat();
+      const blackAndWhite = new cv.Mat();
       const sourcePoints = [];
       corners.forEach(function (point) { sourcePoints.push(point.x * videoWidth, point.y * videoHeight); });
       const sourceMat = cv.matFromArray(4, 1, cv.CV_32FC2, sourcePoints);
@@ -473,12 +476,12 @@
       const transform = cv.getPerspectiveTransform(sourceMat, destinationMat);
       cv.warpPerspective(source, warped, transform, new cv.Size(dimensions.width, dimensions.height), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
       cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY);
-      cv.convertScaleAbs(gray, gray, 1.18, -10);
+      cv.adaptiveThreshold(gray, blackAndWhite, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 31, 12);
       outputCanvas.width = dimensions.width;
       outputCanvas.height = dimensions.height;
-      cv.imshow(outputCanvas, gray);
+      cv.imshow(outputCanvas, blackAndWhite);
       const blob = await canvasToBlob(outputCanvas);
-      source.delete(); warped.delete(); gray.delete(); sourceMat.delete(); destinationMat.delete(); transform.delete();
+      source.delete(); warped.delete(); gray.delete(); blackAndWhite.delete(); sourceMat.delete(); destinationMat.delete(); transform.delete();
       if (!blob) throw new Error("Image conversion failed");
       currentGroup().push({ blob: blob, width: dimensions.width, height: dimensions.height });
       requiresPageChange = true;
@@ -543,7 +546,7 @@
       for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
         const pdf = await PDFLib.PDFDocument.create();
         for (const scan of groups[groupIndex]) {
-          const image = await pdf.embedJpg(await scan.blob.arrayBuffer());
+          const image = await pdf.embedPng(await scan.blob.arrayBuffer());
           const width = scan.width / DPI * 72;
           const height = scan.height / DPI * 72;
           const page = pdf.addPage([width, height]);
@@ -575,7 +578,7 @@
       const title = document.createElement("h3");
       title.textContent = "Document " + (index + 1);
       const note = document.createElement("p");
-      note.textContent = file.pages + " " + (file.pages === 1 ? "page" : "pages") + " - grayscale - 200 DPI";
+      note.textContent = file.pages + " " + (file.pages === 1 ? "page" : "pages") + " - black and white - 200 DPI";
       details.append(title, note);
       const actions = document.createElement("div");
       actions.className = "result-actions";
