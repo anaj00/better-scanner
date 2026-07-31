@@ -137,7 +137,6 @@
     elements.start.disabled = true;
     elements.start.textContent = "Opening camera...";
     try {
-      if (!opencvReady) await waitForOpenCv();
       stopCamera();
       const constraints = {
         audio: false,
@@ -151,12 +150,28 @@
       elements.video.srcObject = stream;
       await elements.video.play();
       setScreen("scanner");
-      elements.status.textContent = "Finding a page...";
-      startDetection();
+      elements.manualCapture.disabled = true;
+      elements.status.textContent = "Starting page detection...";
+      waitForOpenCv().then(function () {
+        if (!stream) return;
+        elements.manualCapture.disabled = false;
+        elements.status.textContent = "Finding a page...";
+        startDetection();
+      }).catch(function () {
+        elements.status.textContent = "Camera is ready, but page detection could not load.";
+        showToast("The camera opened, but page detection did not load. Check your connection and reload.");
+      });
     } catch (error) {
-      const message = error && error.name === "NotAllowedError"
-        ? "Camera permission was denied. Allow it in your browser settings and try again."
-        : "Could not open the camera. Try switching cameras or closing other camera apps.";
+      let message = "Could not open the camera. Try switching cameras or closing other camera apps.";
+      if (error && error.name === "NotAllowedError") {
+        message = "Camera permission was denied. Allow it in your browser settings and try again.";
+      } else if (error && error.name === "NotFoundError") {
+        message = "No camera was found on this device.";
+      } else if (error && error.name === "NotReadableError") {
+        message = "Another app is using the camera. Close it and try again.";
+      } else if (error && error.name === "OverconstrainedError") {
+        message = "This camera does not support the requested settings. Try switching cameras.";
+      }
       showToast(message);
     } finally {
       elements.start.disabled = false;
