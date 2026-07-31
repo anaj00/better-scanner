@@ -334,8 +334,8 @@
         audio: false,
         video: {
           facingMode: { ideal: cameraFacing },
-          width: { ideal: 1920 },
-          height: { ideal: 1920 }
+          width: { ideal: 3840 },
+          height: { ideal: 2160 }
         }
       };
       const openedStream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -789,8 +789,9 @@
   }
 
   function processBlackAndWhite(warped, mats) {
-    const gray = new cv.Mat(); const background = new cv.Mat(); const normalized = new cv.Mat(); const denoised = new cv.Mat(); const output = new cv.Mat(); mats.push(gray, background, normalized, denoised, output);
-    cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); cv.GaussianBlur(gray, background, new cv.Size(0, 0), Math.max(18, Math.round(Math.max(warped.rows, warped.cols) / 35))); cv.divide(gray, background, normalized, 245); cv.medianBlur(normalized, denoised, 3); denoised.convertTo(output, -1, 1.1, -7); return output;
+    const gray = new cv.Mat(); const background = new cv.Mat(); const normalized = new cv.Mat(); const denoised = new cv.Mat(); const binary = new cv.Mat(); const output = new cv.Mat(); mats.push(gray, background, normalized, denoised, binary, output);
+    cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); cv.GaussianBlur(gray, background, new cv.Size(0, 0), Math.max(18, Math.round(Math.max(warped.rows, warped.cols) / 35))); cv.divide(gray, background, normalized, 250); cv.medianBlur(normalized, denoised, 3);
+    let blockSize = Math.round(Math.min(warped.rows, warped.cols) / 18) | 1; blockSize = Math.max(61, Math.min(121, blockSize)); cv.adaptiveThreshold(denoised, binary, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, blockSize, 15); cv.addWeighted(denoised, .25, binary, .75, 0, output); return output;
   }
 
   function reviewPointFromEvent(event) {

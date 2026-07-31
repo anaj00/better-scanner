@@ -8,7 +8,7 @@ Client-only mobile document scanner using browser camera APIs, OpenCV.js, pdf-li
 2. Detection tries connected Canny edges, normal Otsu thresholding, and inverse Otsu thresholding.
 3. It accepts the best page-like contour or rectangular fallback without confidence scoring or image fingerprinting.
 4. Auto-capture requires two detected frames with average corner movement below `0.008`; detection runs every 100ms.
-5. Capture prefers a full-resolution `ImageCapture.takePhoto()` still, maps the preview corners onto it, and falls back to the current video frame when unsupported. Perspective correction preserves the detected rectangle's natural aspect ratio and review image.
+5. Capture prefers a full-resolution `ImageCapture.takePhoto()` still, maps the preview corners onto it, and falls back to a high-resolution video frame when unsupported. Perspective correction preserves the detected rectangle's natural aspect ratio and review image.
 6. The camera rearms after the page has been absent for 650ms. Users can continue scanning into the current filmstrip or start another document.
 7. Original mode exports the exact preserved review image. Grayscale preserves natural luminance, while B&W gently normalizes page lighting and applies mild denoising and contrast. `processing-worker.js` is reserved for imported images and explicit filmstrip edits.
 8. Every scan is centered and aspect-fitted without stretching onto a US Legal PDF page. PDFs can be shared separately or bundled into a ZIP.
@@ -41,4 +41,4 @@ On iPhone Safari, Android Chrome, and Samsung Internet, test camera permission d
 
 ## Limitations
 
-This is a browser approximation, not Apple Notes parity. `ImageCapture`, torch, camera selection, and downloadable file behavior vary by browser. Safari commonly uses the video-frame fallback. Large perspective-corrected images can briefly pause slower phones.
+This is a browser approximation, not Apple Notes parity. `ImageCapture`, torch, camera selection, and downloadable file behavior vary by browser. iPhone Safari does not expose automatic full-resolution still capture, so auto-capture uses the highest available video frame there. “Use phone camera app” invokes the native still camera but requires manual capture. Large perspective-corrected images can briefly pause slower phones.
