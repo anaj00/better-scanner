@@ -605,6 +605,23 @@
     if (navigator.vibrate) navigator.vibrate(35);
   }
 
+  async function captureSourceFrame(corners) {
+    const previewWidth = elements.video.videoWidth; const previewHeight = elements.video.videoHeight; const track = stream && stream.getVideoTracks()[0];
+    showShutterFeedback();
+    if (window.ImageCapture && track) {
+      try {
+        const blob = await new ImageCapture(track).takePhoto(); const source = await decodeBlobToSource(blob);
+        try {
+          const mappedCorners = mapPreviewCornersToStill(corners, previewWidth, previewHeight, source.width, source.height); const scale = Math.min(1, 4096 / Math.max(source.width, source.height), Math.sqrt(12000000 / (source.width * source.height)));
+          sourceCanvas.width = Math.round(source.width * scale); sourceCanvas.height = Math.round(source.height * scale); sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(source, 0, 0, sourceCanvas.width, sourceCanvas.height);
+          return { corners: mappedCorners, width: sourceCanvas.width, height: sourceCanvas.height };
+        } finally { if (source.close) source.close(); }
+      } catch (error) { /* Use the current video frame below. */ }
+    }
+    sourceCanvas.width = previewWidth; sourceCanvas.height = previewHeight; sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(elements.video, 0, 0, previewWidth, previewHeight);
+    return { corners: corners, width: previewWidth, height: previewHeight };
+  }
+
   async function captureCurrentPage(corners, source) {
     if (isCapturing || finishing || totalPages() >= 50) return;
     isCapturing = true;
@@ -612,9 +629,9 @@
     const started = performance.now(); const captureSessionId = cameraSessionId; const targetGroup = currentGroup(); const mats = [];
     const chosenCorners = corners && ScannerGeometry.validateQuad(corners) ? corners.map(function (point) { return { x: point.x, y: point.y }; }) : pageGuideCorners();
     try {
-      const videoWidth = elements.video.videoWidth; const videoHeight = elements.video.videoHeight; sourceCanvas.width = videoWidth; sourceCanvas.height = videoHeight; sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(elements.video, 0, 0, videoWidth, videoHeight); showShutterFeedback();
-      const dimensions = outputDimensions(chosenCorners, videoWidth, videoHeight); const input = cv.imread(sourceCanvas); const warped = new cv.Mat(); mats.push(input, warped);
-      const sourcePoints = []; chosenCorners.forEach(function (point) { sourcePoints.push(point.x * videoWidth, point.y * videoHeight); });
+      const captured = await captureSourceFrame(chosenCorners); if (captureSessionId !== cameraSessionId) return;
+      const dimensions = outputDimensions(captured.corners, captured.width, captured.height); const input = cv.imread(sourceCanvas); const warped = new cv.Mat(); mats.push(input, warped);
+      const sourcePoints = []; captured.corners.forEach(function (point) { sourcePoints.push(point.x * captured.width, point.y * captured.height); });
       const sourceMat = cv.matFromArray(4, 1, cv.CV_32FC2, sourcePoints); const destinationMat = cv.matFromArray(4, 1, cv.CV_32FC2, [0,0,dimensions.width-1,0,dimensions.width-1,dimensions.height-1,0,dimensions.height-1]); const transform = cv.getPerspectiveTransform(sourceMat, destinationMat); mats.push(sourceMat, destinationMat, transform);
       cv.warpPerspective(input, warped, transform, new cv.Size(dimensions.width, dimensions.height), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
       const originalCanvas = document.createElement("canvas"); originalCanvas.width = dimensions.width; originalCanvas.height = dimensions.height; cv.imshow(originalCanvas, warped); const originalBlob = await canvasToBlob(originalCanvas, "image/jpeg", .95);
@@ -773,7 +790,7 @@
 
   function processBlackAndWhite(warped, mats) {
     const gray = new cv.Mat(); const background = new cv.Mat(); const normalized = new cv.Mat(); const denoised = new cv.Mat(); const output = new cv.Mat(); mats.push(gray, background, normalized, denoised, output);
-    cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); cv.GaussianBlur(gray, background, new cv.Size(0, 0), Math.max(18, Math.round(Math.max(warped.rows, warped.cols) / 35))); cv.divide(gray, background, normalized, 235); cv.medianBlur(normalized, denoised, 3); denoised.convertTo(output, -1, 1.05, -3); return output;
+    cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); cv.GaussianBlur(gray, background, new cv.Size(0, 0), Math.max(18, Math.round(Math.max(warped.rows, warped.cols) / 35))); cv.divide(gray, background, normalized, 245); cv.medianBlur(normalized, denoised, 3); denoised.convertTo(output, -1, 1.1, -7); return output;
   }
 
   function reviewPointFromEvent(event) {
