@@ -34,9 +34,12 @@
           <div id="camera-status" class="camera-status">Opening camera...</div>
           <div class="camera-topbar">
             <span id="document-count" class="document-count">Document 1</span>
-            <button id="menu-button" class="menu-button" type="button" aria-label="Open scan menu" aria-expanded="false">
-              <span></span><span></span><span></span>
-            </button>
+            <div class="camera-topbar-actions">
+              <button id="flash-button" class="camera-flash-button" type="button" disabled>Flash</button>
+              <button id="menu-button" class="menu-button" type="button" aria-label="Open scan menu" aria-expanded="false">
+                <span></span><span></span><span></span>
+              </button>
+            </div>
           </div>
           <div id="capture-flash" class="capture-flash" aria-hidden="true"></div>
         </div>
@@ -71,16 +74,15 @@
             <label class="scan-mode-control" for="scan-mode-select">
               Scan mode
               <select id="scan-mode-select">
-                <option value="black-and-white">Text (B&W)</option>
+                <option value="black-and-white" selected>Text (B&W)</option>
                 <option value="grayscale">Grayscale</option>
-                <option value="original" selected>Original</option>
+                <option value="original">Original</option>
               </select>
             </label>
 
             <label class="auto-capture-control"><input id="auto-capture-toggle" type="checkbox" checked /> Auto capture</label>
 
             <div class="menu-utilities">
-              <button id="flash-button" class="utility-button" type="button" disabled>Flash</button>
               <button id="switch-camera-button" class="utility-button" type="button">Flip camera</button>
             </div>
 

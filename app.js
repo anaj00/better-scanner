@@ -7,6 +7,7 @@
   const DETECTION_INTERVAL = 100;
   const PAGE_REMOVED_DELAY = 650;
   const PAGE_CHANGE_DELAY = 900;
+  const CAMERA_FOCUS_SETTLE_MS = 700;
 
   const elements = {
     appHeader: document.querySelector("#app-header"),
@@ -104,6 +105,8 @@
   let processingWorker = null;
   let processingWorkerRestarts = 0;
   let processingReadyTimer;
+  let stillImageCapture = null;
+  let cameraReadyAt = 0;
 
   const processCanvas = document.createElement("canvas");
   const sourceCanvas = document.createElement("canvas");
@@ -238,6 +241,8 @@
     }
     elements.video.srcObject = null;
     torchEnabled = false;
+    stillImageCapture = null;
+    cameraReadyAt = 0;
     stableCorners = [];
     currentCorners = undefined;
     requiresPageChange = false;
@@ -344,13 +349,20 @@
       elements.video.srcObject = stream;
       await elements.video.play();
       if (sessionId !== cameraSessionId) return;
+      const track = stream.getVideoTracks()[0]; const capabilities = track && track.getCapabilities ? track.getCapabilities() : {};
+      if (track && track.applyConstraints && Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes("continuous")) {
+        try { await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }); } catch (error) { /* Continuous autofocus remains the browser default. */ }
+      }
+      if (window.ImageCapture && track) { try { stillImageCapture = new ImageCapture(track); } catch (error) { stillImageCapture = null; } }
+      cameraReadyAt = performance.now() + CAMERA_FOCUS_SETTLE_MS;
       updateFlashControl();
       elements.manualCapture.disabled = true;
       elements.status.textContent = "Starting page detection...";
       waitForOpenCv().then(function () {
         if (!stream || sessionId !== cameraSessionId) return;
-        elements.manualCapture.disabled = false;
-        elements.status.textContent = "Finding a page...";
+        const focusDelay = Math.max(0, cameraReadyAt - performance.now());
+        setTimeout(function () { if (stream && sessionId === cameraSessionId) elements.manualCapture.disabled = false; }, focusDelay);
+        elements.status.textContent = focusDelay ? "Focusing camera..." : "Finding a page...";
         startDetection();
       }).catch(function () {
         if (sessionId !== cameraSessionId) return;
@@ -563,10 +575,10 @@
     }
     stableCorners.push(corners);
     if (stableCorners.length > AUTO_CAPTURE_STABLE_FRAMES) stableCorners.shift();
-    const stable = stableCorners.length === AUTO_CAPTURE_STABLE_FRAMES && averageCornerMovement(stableCorners) < .008;
-    drawOutline(corners, stable);
-    elements.status.textContent = stable ? (elements.autoCapture.checked ? "Page ready. Capturing..." : "Page ready. Tap capture.") : "Hold steady to scan automatically...";
-    if (stable && elements.autoCapture.checked) captureCurrentPage(corners, "auto");
+    const stable = stableCorners.length === AUTO_CAPTURE_STABLE_FRAMES && averageCornerMovement(stableCorners) < .008; const focusReady = performance.now() >= cameraReadyAt;
+    drawOutline(corners, stable && focusReady);
+    elements.status.textContent = !focusReady ? "Focusing camera..." : stable ? (elements.autoCapture.checked ? "Page ready. Capturing..." : "Page ready. Tap capture.") : "Hold steady to scan automatically...";
+    if (stable && focusReady && elements.autoCapture.checked) captureCurrentPage(corners, "auto");
   }
 
   function distance(one, two) {
@@ -608,15 +620,16 @@
   async function captureSourceFrame(corners) {
     const previewWidth = elements.video.videoWidth; const previewHeight = elements.video.videoHeight; const track = stream && stream.getVideoTracks()[0];
     showShutterFeedback();
-    if (window.ImageCapture && track) {
+    if (!stillImageCapture && window.ImageCapture && track) { try { stillImageCapture = new ImageCapture(track); } catch (error) { stillImageCapture = null; } }
+    if (stillImageCapture) {
       try {
-        const blob = await new ImageCapture(track).takePhoto(); const source = await decodeBlobToSource(blob);
+        const blob = await stillImageCapture.takePhoto(); const source = await decodeBlobToSource(blob);
         try {
           const mappedCorners = mapPreviewCornersToStill(corners, previewWidth, previewHeight, source.width, source.height); const scale = Math.min(1, 4096 / Math.max(source.width, source.height), Math.sqrt(12000000 / (source.width * source.height)));
           sourceCanvas.width = Math.round(source.width * scale); sourceCanvas.height = Math.round(source.height * scale); sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(source, 0, 0, sourceCanvas.width, sourceCanvas.height);
           return { corners: mappedCorners, width: sourceCanvas.width, height: sourceCanvas.height };
         } finally { if (source.close) source.close(); }
-      } catch (error) { /* Use the current video frame below. */ }
+      } catch (error) { stillImageCapture = null; /* Use the current video frame below. */ }
     }
     sourceCanvas.width = previewWidth; sourceCanvas.height = previewHeight; sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(elements.video, 0, 0, previewWidth, previewHeight);
     return { corners: corners, width: previewWidth, height: previewHeight };
@@ -927,6 +940,7 @@
 
   function manualCapture() {
     if (requiresPageChange) { showToast("Move the current page away before capturing the next one."); return; }
+    if (performance.now() < cameraReadyAt) { showToast("Give the camera a moment to focus."); return; }
     if (!currentCorners) showToast("Using the Legal guide. Keep the page inside its dashed border.");
     captureCurrentPage(currentCorners || pageGuideCorners(), "manual");
   }
