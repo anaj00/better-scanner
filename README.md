@@ -10,7 +10,7 @@ Client-only mobile document scanner using browser camera APIs, OpenCV.js, pdf-li
 4. Auto-capture waits 700ms for initial autofocus, then holds each stable page for another 350ms so iPhone autofocus can settle before capture. Detection runs every 100ms.
 5. Capture prefers a full-resolution `ImageCapture.takePhoto()` still, maps the preview corners onto it, and falls back to a high-resolution video frame when unsupported. Perspective correction compensates for opposite-edge foreshortening while preserving arbitrary document aspect ratios.
 6. The camera rearms after the page has been absent for 650ms. Users can continue scanning into the current filmstrip or start another document.
-7. Original mode exports the exact preserved review image. Grayscale preserves natural luminance, while B&W gently normalizes page lighting and applies mild denoising and contrast. `processing-worker.js` is reserved for imported images and explicit filmstrip edits.
+7. Captures are admitted immediately, then `processing-worker.js` performs perspective correction and filtering one page at a time while the camera remains available. Original mode preserves natural color, grayscale preserves luminance, and B&W normalizes page lighting before applying the text filter.
 8. Every scan is centered and aspect-fitted without stretching onto a US Legal PDF page. PDFs can be shared separately or bundled into a ZIP.
 
 ## Run

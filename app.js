@@ -172,7 +172,7 @@
   }
 
   function renderFilmstrip() {
-    const pages = allPages(); elements.filmstrip.replaceChildren();
+    const pages = currentGroup(); elements.filmstrip.replaceChildren();
     pages.forEach(function (page, index) {
       const button = document.createElement("button"); button.type = "button"; button.className = "filmstrip-page " + page.status + " " + page.cropStatus; button.dataset.pageId = page.id; button.setAttribute("role", "listitem"); button.setAttribute("aria-label", "Review page " + (index + 1));
       if (page.thumbnailUrl) { const image = document.createElement("img"); image.src = page.thumbnailUrl; image.alt = ""; button.append(image); }
@@ -615,8 +615,8 @@
     } finally { URL.revokeObjectURL(url); }
   }
 
-  function showCaptureFeedback(page) {
-    clearTimeout(feedbackTimer); elements.captureFeedbackText.textContent = "Page " + totalPages() + " captured"; elements.captureFeedback.hidden = false;
+  function showCaptureFeedback() {
+    clearTimeout(feedbackTimer); elements.captureFeedbackText.textContent = "Page " + currentGroup().length + " captured"; elements.captureFeedback.hidden = false;
     feedbackTimer = setTimeout(function () { elements.captureFeedback.hidden = true; }, 2800);
   }
 
@@ -640,43 +640,39 @@
         try {
           const mappedCorners = mapPreviewCornersToStill(corners, previewWidth, previewHeight, source.width, source.height); const scale = Math.min(1, 4096 / Math.max(source.width, source.height), Math.sqrt(12000000 / (source.width * source.height)));
           sourceCanvas.width = Math.round(source.width * scale); sourceCanvas.height = Math.round(source.height * scale); sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(source, 0, 0, sourceCanvas.width, sourceCanvas.height);
-          return { corners: mappedCorners, width: sourceCanvas.width, height: sourceCanvas.height };
+          return { blob: blob, corners: mappedCorners, width: source.width, height: source.height };
         } finally { if (source.close) source.close(); }
       } catch (error) { stillImageCapture = null; /* Use the current video frame below. */ }
     }
-    sourceCanvas.width = previewWidth; sourceCanvas.height = previewHeight; sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(elements.video, 0, 0, previewWidth, previewHeight);
-    return { corners: corners, width: previewWidth, height: previewHeight };
+    const fallbackScale = Math.min(1, 2400 / Math.max(previewWidth, previewHeight), Math.sqrt(4000000 / (previewWidth * previewHeight))); sourceCanvas.width = Math.round(previewWidth * fallbackScale); sourceCanvas.height = Math.round(previewHeight * fallbackScale); sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(elements.video, 0, 0, sourceCanvas.width, sourceCanvas.height);
+    return { blob: await canvasToBlob(sourceCanvas, "image/jpeg", .95), corners: corners, width: sourceCanvas.width, height: sourceCanvas.height };
   }
 
-  async function captureCurrentPage(corners, source) {
+  async function createCaptureThumbnail(page, corners) {
+    try {
+      const minX = Math.max(0, Math.min.apply(null, corners.map(function (point) { return point.x; }))); const maxX = Math.min(1, Math.max.apply(null, corners.map(function (point) { return point.x; }))); const minY = Math.max(0, Math.min.apply(null, corners.map(function (point) { return point.y; }))); const maxY = Math.min(1, Math.max.apply(null, corners.map(function (point) { return point.y; })));
+      const canvas = document.createElement("canvas"); canvas.width = 160; canvas.height = 200; canvas.getContext("2d").drawImage(sourceCanvas, minX * sourceCanvas.width, minY * sourceCanvas.height, Math.max(2, (maxX - minX) * sourceCanvas.width), Math.max(2, (maxY - minY) * sourceCanvas.height), 0, 0, canvas.width, canvas.height); const blob = await canvasToBlob(canvas, "image/jpeg", .72);
+      if (!findPage(page.id) || page.processedImage) return; page.thumbnailBlob = blob; if (page.thumbnailUrl) URL.revokeObjectURL(page.thumbnailUrl); page.thumbnailUrl = URL.createObjectURL(blob); renderFilmstrip();
+    } catch (error) { /* The worker-generated thumbnail will replace this. */ }
+  }
+
+  async function captureCurrentPage(corners) {
     if (isCapturing || finishing || totalPages() >= 50) return;
     isCapturing = true;
-    elements.status.textContent = "Processing page...";
-    const started = performance.now(); const captureSessionId = cameraSessionId; const targetGroup = currentGroup(); const mats = [];
+    elements.status.textContent = "Taking photo...";
+    const started = performance.now(); const captureSessionId = cameraSessionId; const targetGroup = currentGroup();
     const chosenCorners = corners && ScannerGeometry.validateQuad(corners) ? corners.map(function (point) { return { x: point.x, y: point.y }; }) : pageGuideCorners();
     try {
       const captured = await captureSourceFrame(chosenCorners); if (captureSessionId !== cameraSessionId) return;
-      const dimensions = outputDimensions(captured.corners, captured.width, captured.height); const input = cv.imread(sourceCanvas); const warped = new cv.Mat(); mats.push(input, warped);
-      const sourcePoints = []; captured.corners.forEach(function (point) { sourcePoints.push(point.x * captured.width, point.y * captured.height); });
-      const sourceMat = cv.matFromArray(4, 1, cv.CV_32FC2, sourcePoints); const destinationMat = cv.matFromArray(4, 1, cv.CV_32FC2, [0,0,dimensions.width-1,0,dimensions.width-1,dimensions.height-1,0,dimensions.height-1]); const transform = cv.getPerspectiveTransform(sourceMat, destinationMat); mats.push(sourceMat, destinationMat, transform);
-      cv.warpPerspective(input, warped, transform, new cv.Size(dimensions.width, dimensions.height), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
-      const originalCanvas = document.createElement("canvas"); originalCanvas.width = dimensions.width; originalCanvas.height = dimensions.height; cv.imshow(originalCanvas, warped); const originalBlob = await canvasToBlob(originalCanvas, "image/jpeg", .95);
-      const mode = elements.scanMode.value; const mimeType = "image/jpeg"; let blob;
-      outputCanvas.width = dimensions.width; outputCanvas.height = dimensions.height;
-      if (mode === "original") { outputCanvas.getContext("2d").drawImage(originalCanvas, 0, 0); blob = originalBlob; }
-      else { const output = mode === "grayscale" ? processGrayscale(warped, mats) : processBlackAndWhite(warped, mats); cv.imshow(outputCanvas, output); blob = await canvasToBlob(outputCanvas, mimeType, .9); }
-      if (captureSessionId !== cameraSessionId) return;
-      const thumbnailCanvas = document.createElement("canvas"); const thumbnailScale = 200 / Math.max(dimensions.width, dimensions.height); thumbnailCanvas.width = Math.round(dimensions.width * thumbnailScale); thumbnailCanvas.height = Math.round(dimensions.height * thumbnailScale); thumbnailCanvas.getContext("2d").drawImage(outputCanvas, 0, 0, thumbnailCanvas.width, thumbnailCanvas.height); const thumbnailBlob = await canvasToBlob(thumbnailCanvas, "image/jpeg", .72);
-      if (captureSessionId !== cameraSessionId) return;
-      const fullImage = [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}];
-      const page = { id: makeId(), revision: 1, sequence: pageSequence += 1, createdAt: started, originalImage: originalBlob, detectedCorners: fullImage, refinedCorners: fullImage, finalCorners: fullImage, cornersAreStill: true, detectionConfidence: 1, refinementConfidence: 1, cropStatus: "accepted", qualityWarnings: [], processedImage: blob, processedMimeType: mimeType, processedWidth: dimensions.width, processedHeight: dimensions.height, rotation: 0, scanMode: mode, status: "ready", previewWidth: dimensions.width, previewHeight: dimensions.height, sourceWidth: dimensions.width, sourceHeight: dimensions.height, thumbnailBlob: thumbnailBlob, thumbnailUrl: URL.createObjectURL(thumbnailBlob), processingAttempts: 0, timings: { totalReadyMs: performance.now() - started }, cancelled: false };
+      const page = { id: makeId(), revision: 1, sequence: pageSequence += 1, createdAt: started, originalImage: captured.blob, detectedCorners: captured.corners, refinedCorners: null, finalCorners: captured.corners, cornersAreStill: true, detectionConfidence: 1, refinementConfidence: 0, cropStatus: "accepted", qualityWarnings: [], processedImage: null, processedMimeType: null, processedWidth: 0, processedHeight: 0, rotation: 0, scanMode: elements.scanMode.value, status: "captured", previewWidth: captured.width, previewHeight: captured.height, sourceWidth: captured.width, sourceHeight: captured.height, thumbnailBlob: null, thumbnailUrl: null, processingAttempts: 0, timings: { stillCaptureMs: performance.now() - started }, cancelled: false };
       targetGroup.push(page); requiresPageChange = true; lastPageSeenAt = Date.now(); stableCorners = []; stableSince = 0;
-      elements.manualCapture.disabled = true; updateControls(); showCaptureFeedback(page); elements.status.textContent = "Move the page away, then show the next one.";
+      createCaptureThumbnail(page, captured.corners); processingQueue.push({ pageId: page.id, revision: page.revision, generation: sessionGeneration }); pumpProcessingQueue();
+      elements.manualCapture.disabled = true; updateControls(); showCaptureFeedback(); elements.status.textContent = "Move the page away, then show the next one.";
       setTimeout(function () { if (requiresPageChange) elements.status.textContent = "Move the page away, then show the next one."; }, PAGE_CHANGE_DELAY);
     } catch (error) {
-      showToast("Could not process this page. Try the capture button again."); elements.status.textContent = "Ready to try again.";
+      showToast("Could not capture this page. Try again."); elements.status.textContent = "Ready to try again.";
     } finally {
-      mats.reverse().forEach(function (mat) { if (mat) mat.delete(); }); sourceCanvas.width = 1; sourceCanvas.height = 1; outputCanvas.width = 1; outputCanvas.height = 1; isCapturing = false; if (finishing) maybeCompleteFinish();
+      sourceCanvas.width = 1; sourceCanvas.height = 1; isCapturing = false; if (finishing) maybeCompleteFinish();
     }
   }
 
@@ -710,10 +706,10 @@
       page.sourceWidth = source.width; page.sourceHeight = source.height;
       const corners = page.cornersAreStill ? page.finalCorners : mapPreviewCornersToStill(page.finalCorners, page.previewWidth, page.previewHeight, source.width, source.height);
       page.finalCorners = corners; page.cornersAreStill = true;
-      const memory = navigator.deviceMemory || 4; const maximumInput = memory <= 2 ? 2400 : 4000; const maximumInputPixels = memory <= 2 ? 5000000 : 12000000; const scale = Math.min(1, maximumInput / Math.max(source.width, source.height), Math.sqrt(maximumInputPixels / (source.width * source.height)));
+      const memory = navigator.deviceMemory || 4; const maximumInput = memory <= 2 ? 2200 : 3000; const maximumInputPixels = memory <= 2 ? 4000000 : 8000000; const scale = Math.min(1, maximumInput / Math.max(source.width, source.height), Math.sqrt(maximumInputPixels / (source.width * source.height)));
       const canvas = document.createElement("canvas"); canvas.width = Math.round(source.width * scale); canvas.height = Math.round(source.height * scale); const context = canvas.getContext("2d", { willReadFrequently: true }); context.drawImage(source, 0, 0, canvas.width, canvas.height); const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
       page.timings.sourcePreservationMs = performance.now() - started;
-      processingWorker.postMessage({ type: "process", pageId: page.id, revision: page.revision, generation: job.generation, width: canvas.width, height: canvas.height, buffer: imageData.data.buffer, corners: corners, rotation: page.rotation || 0, mode: page.scanMode, maximumDimension: memory <= 2 ? 2000 : (memory <= 4 ? 2800 : 3200), maximumPixels: memory <= 2 ? 4000000 : 8000000 }, [imageData.data.buffer]);
+      processingWorker.postMessage({ type: "process", pageId: page.id, revision: page.revision, generation: job.generation, width: canvas.width, height: canvas.height, buffer: imageData.data.buffer, corners: corners, rotation: page.rotation || 0, mode: page.scanMode, maximumDimension: memory <= 2 ? 1800 : 2200, maximumPixels: memory <= 2 ? 3000000 : 4000000 }, [imageData.data.buffer]);
       canvas.width = 0; canvas.height = 0;
     } finally { if (source.close) source.close(); }
   }
