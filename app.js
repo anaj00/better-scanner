@@ -2,9 +2,9 @@
 (function () {
   "use strict";
 
-  const PROCESSING_WIDTH = 480;
-  const AUTO_CAPTURE_STABLE_FRAMES = 2;
-  const DETECTION_INTERVAL = 180;
+  const PROCESSING_WIDTH = 600;
+  const AUTO_CAPTURE_STABLE_FRAMES = 3;
+  const DETECTION_INTERVAL = 100;
   const PAGE_REMOVED_DELAY = 350;
   const PAGE_CHANGE_DELAY = 450;
   const DPI = 200;
@@ -55,15 +55,10 @@
   let generatedFiles = [];
   let toastTimer;
   let torchEnabled = false;
-  let detectionAttempts = 0;
-  let fallbackDetectionActive = false;
-  let detectorBusy = false;
-  let detectorRequestId = 0;
 
   const processCanvas = document.createElement("canvas");
   const sourceCanvas = document.createElement("canvas");
   const outputCanvas = document.createElement("canvas");
-  const detectorWorker = typeof Worker === "function" ? new Worker("detector-worker.js") : null;
 
   function showToast(message) {
     clearTimeout(toastTimer);
@@ -135,9 +130,6 @@
     }
     elements.video.srcObject = null;
     torchEnabled = false;
-    detectionAttempts = 0;
-    fallbackDetectionActive = false;
-    detectorBusy = false;
     elements.flashButton.disabled = true;
     elements.flashButton.textContent = "Flash";
     closeMenu();
@@ -438,7 +430,7 @@
     }
   }
 
-  function quadrilateralFromCanvas(canvas, useFallback) {
+  function quadrilateralFromCanvas(canvas) {
     const src = cv.imread(canvas);
     const gray = new cv.Mat();
     const blurred = new cv.Mat();
@@ -454,18 +446,16 @@
       cv.Canny(blurred, edges, 20, 90);
       cv.morphologyEx(edges, connectedEdges, cv.MORPH_CLOSE, kernel);
       let rectangle = bestRectangleFromMask(connectedEdges, canvas, cv.RETR_EXTERNAL, .1);
+      if (!rectangle) rectangle = bestRectangleFromMask(connectedEdges, canvas, cv.RETR_LIST, .18);
       if (rectangle) return rectangle;
 
       // A light page on a darker table often has no continuous Canny border.
       cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
       cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel);
       rectangle = bestRectangleFromMask(threshold, canvas, cv.RETR_EXTERNAL, .1);
+      if (!rectangle) rectangle = bestRectangleFromMask(threshold, canvas, cv.RETR_LIST, .18);
       if (rectangle) return rectangle;
 
-      if (!useFallback) return undefined;
-
-      rectangle = bestRectangleFromMask(connectedEdges, canvas, cv.RETR_LIST, .18);
-      if (rectangle) return rectangle;
       cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
       cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel);
       rectangle = bestRectangleFromMask(threshold, canvas, cv.RETR_EXTERNAL, .1);
@@ -495,7 +485,7 @@
   }
 
   function processFrame() {
-    if (!stream || elements.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || isCapturing || detectorBusy) return;
+    if (!opencvReady || !stream || elements.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || isCapturing) return;
     const videoWidth = elements.video.videoWidth;
     const videoHeight = elements.video.videoHeight;
     if (!videoWidth || !videoHeight) return;
@@ -503,34 +493,13 @@
     processCanvas.width = Math.round(videoWidth * scale);
     processCanvas.height = Math.round(videoHeight * scale);
     processCanvas.getContext("2d", { willReadFrequently: true }).drawImage(elements.video, 0, 0, processCanvas.width, processCanvas.height);
-    detectorBusy = true;
-    detectionAttempts += 1;
-    const useFallback = fallbackDetectionActive || detectionAttempts % 3 === 0;
-    const requestId = detectorRequestId += 1;
-    if (!detectorWorker) {
-      detectorBusy = false;
+    let corners;
+    try {
+      corners = quadrilateralFromCanvas(processCanvas);
+    } catch (error) {
       elements.status.textContent = "Use the capture button if page detection is unavailable.";
       return;
     }
-    const postFrame = function (frame) {
-      detectorWorker.postMessage({ id: requestId, width: processCanvas.width, height: processCanvas.height, fallback: useFallback, ...frame }, frame.bitmap ? [frame.bitmap] : []);
-    };
-    if (typeof createImageBitmap === "function") {
-      createImageBitmap(processCanvas).then(function (bitmap) {
-        postFrame({ bitmap: bitmap });
-      }).catch(function () {
-        const imageData = processCanvas.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, processCanvas.width, processCanvas.height);
-        postFrame({ imageData: imageData });
-      });
-    } else {
-      const imageData = processCanvas.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, processCanvas.width, processCanvas.height);
-      postFrame({ imageData: imageData });
-    }
-  }
-
-  function handleDetection(corners) {
-    detectorBusy = false;
-    if (fallbackDetectionActive || detectionAttempts % 3 === 0) fallbackDetectionActive = Boolean(corners);
     currentCorners = corners;
     if (!corners) {
       currentCorners = pageGuideCorners();
@@ -842,15 +811,6 @@
   });
   window.addEventListener("beforeunload", stopCamera);
   window.addEventListener("resize", function () { if (stream) resizeOverlay(); });
-  if (detectorWorker) {
-    detectorWorker.onmessage = function (event) {
-      if (event.data.type === "result") handleDetection(event.data.corners);
-    };
-    detectorWorker.onerror = function () {
-      detectorBusy = false;
-      showToast("Page detection is unavailable. Use the capture button manually.");
-    };
-  }
   updateControls();
   setTimeout(startCamera, 0);
 })();
