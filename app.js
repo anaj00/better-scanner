@@ -57,10 +57,13 @@
   let torchEnabled = false;
   let detectionAttempts = 0;
   let fallbackDetectionActive = false;
+  let detectorBusy = false;
+  let detectorRequestId = 0;
 
   const processCanvas = document.createElement("canvas");
   const sourceCanvas = document.createElement("canvas");
   const outputCanvas = document.createElement("canvas");
+  const detectorWorker = typeof Worker === "function" ? new Worker("detector-worker.js") : null;
 
   function showToast(message) {
     clearTimeout(toastTimer);
@@ -134,6 +137,7 @@
     torchEnabled = false;
     detectionAttempts = 0;
     fallbackDetectionActive = false;
+    detectorBusy = false;
     elements.flashButton.disabled = true;
     elements.flashButton.textContent = "Flash";
     closeMenu();
@@ -491,7 +495,7 @@
   }
 
   function processFrame() {
-    if (!opencvReady || !stream || elements.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || isCapturing) return;
+    if (!stream || elements.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || isCapturing || detectorBusy) return;
     const videoWidth = elements.video.videoWidth;
     const videoHeight = elements.video.videoHeight;
     if (!videoWidth || !videoHeight) return;
@@ -499,16 +503,34 @@
     processCanvas.width = Math.round(videoWidth * scale);
     processCanvas.height = Math.round(videoHeight * scale);
     processCanvas.getContext("2d", { willReadFrequently: true }).drawImage(elements.video, 0, 0, processCanvas.width, processCanvas.height);
-    let corners;
-    try {
-      detectionAttempts += 1;
-      const useFallback = fallbackDetectionActive || detectionAttempts % 3 === 0;
-      corners = quadrilateralFromCanvas(processCanvas, useFallback);
-      if (useFallback) fallbackDetectionActive = Boolean(corners);
-    } catch (error) {
+    detectorBusy = true;
+    detectionAttempts += 1;
+    const useFallback = fallbackDetectionActive || detectionAttempts % 3 === 0;
+    const requestId = detectorRequestId += 1;
+    if (!detectorWorker) {
+      detectorBusy = false;
       elements.status.textContent = "Use the capture button if page detection is unavailable.";
       return;
     }
+    const postFrame = function (frame) {
+      detectorWorker.postMessage({ id: requestId, width: processCanvas.width, height: processCanvas.height, fallback: useFallback, ...frame }, frame.bitmap ? [frame.bitmap] : []);
+    };
+    if (typeof createImageBitmap === "function") {
+      createImageBitmap(processCanvas).then(function (bitmap) {
+        postFrame({ bitmap: bitmap });
+      }).catch(function () {
+        const imageData = processCanvas.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, processCanvas.width, processCanvas.height);
+        postFrame({ imageData: imageData });
+      });
+    } else {
+      const imageData = processCanvas.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, processCanvas.width, processCanvas.height);
+      postFrame({ imageData: imageData });
+    }
+  }
+
+  function handleDetection(corners) {
+    detectorBusy = false;
+    if (fallbackDetectionActive || detectionAttempts % 3 === 0) fallbackDetectionActive = Boolean(corners);
     currentCorners = corners;
     if (!corners) {
       currentCorners = pageGuideCorners();
@@ -820,6 +842,15 @@
   });
   window.addEventListener("beforeunload", stopCamera);
   window.addEventListener("resize", function () { if (stream) resizeOverlay(); });
+  if (detectorWorker) {
+    detectorWorker.onmessage = function (event) {
+      if (event.data.type === "result") handleDetection(event.data.corners);
+    };
+    detectorWorker.onerror = function () {
+      detectorBusy = false;
+      showToast("Page detection is unavailable. Use the capture button manually.");
+    };
+  }
   updateControls();
   setTimeout(startCamera, 0);
 })();

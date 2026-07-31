@@ -22,6 +22,8 @@ Open the URL on an iPhone or Android phone, grant camera access, and use the rea
 
 PDF pages are US Legal at an effective 200 DPI. Text (B&W) is the default; grayscale and color are also available before capturing a page. Flash uses the browser torch API where the phone and browser support it; iPhone Safari may not expose that control.
 
+Live page detection runs in `detector-worker.js` so contour processing does not block camera rendering. The worker uses transferable `ImageBitmap` frames where available and an `ImageData` fallback for browsers that do not support that transfer path.
+
 ## Compatibility
 
 Target browsers are iPhone Safari, Android Chrome, Samsung Internet, and other modern mobile browsers with `getUserMedia()` camera access. A camera-switch control and manual crop fallback are available for devices where rear-camera selection or automatic page detection is imperfect.
