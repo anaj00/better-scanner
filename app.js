@@ -2,18 +2,11 @@
 (function () {
   "use strict";
 
-  const PROCESSING_WIDTH = 480;
-  const AUTO_CAPTURE_STABLE_FRAMES = 6;
-  const DETECTION_INTERVAL = 125;
-  const DEBUG_MODE = new URLSearchParams(location.search).get("debug") === "1";
-  const HIGH_CONFIDENCE = .82;
-  const MEDIUM_CONFIDENCE = .62;
-  const SAFE_BORDER_MARGIN = .015;
-  const STRONG_EDGE_SUPPORT = .55;
-  const DUPLICATE_DISTANCE = 5;
-  const REARM_DIFFERENCE = 14;
-  const REARM_DIFFERENT_FRAMES = 3;
-  const MAX_PROCESS_QUEUE = 6;
+  const PROCESSING_WIDTH = 720;
+  const AUTO_CAPTURE_STABLE_FRAMES = 3;
+  const DETECTION_INTERVAL = 130;
+  const PAGE_REMOVED_DELAY = 650;
+  const PAGE_CHANGE_DELAY = 900;
 
   const elements = {
     appHeader: document.querySelector("#app-header"),
@@ -86,25 +79,15 @@
   let generatedFiles = [];
   let toastTimer;
   let torchEnabled = false;
-  let detectorBusy = false;
-  let detectorRequestId = 0;
   let pendingCapture;
   let reviewCorners;
   let initialReviewCorners;
   let activeReviewCorner = -1;
-  let readySince = 0;
   let appPhase = "welcome";
-  let detectedCorners = null;
-  let displayCorners = null;
-  let lastReliableCorners = null;
-  let lastDetectorMetrics = null;
-  let lastDetectionConfidence = 0;
-  let lastHandledDetectionId = 0;
   let reviewUrl;
   let processedReviewUrl;
   let showingProcessedReview = false;
   let cameraSessionId = 0;
-  let activeDetectorRequestId = 0;
   let reviewGeneration = 0;
   let reviewRotation = 0;
   let pageSequence = 0;
@@ -117,18 +100,14 @@
   let reviewReturnPhase = "scanner";
   let flaggedReviewIds = [];
   let finishing = false;
-  let lastCapturedFingerprint = null;
-  let lastCapturedGeometry = null;
-  let replacementDifferenceFrames = 0;
-  let pageAbsentSince = 0;
   let feedbackTimer;
-  let detectorWorker = null;
   let processingWorker = null;
-  let detectorWorkerRestarts = 0;
   let processingWorkerRestarts = 0;
   let processingReadyTimer;
 
   const processCanvas = document.createElement("canvas");
+  const sourceCanvas = document.createElement("canvas");
+  const outputCanvas = document.createElement("canvas");
   let processContext;
 
   function showToast(message) {
@@ -259,13 +238,9 @@
     }
     elements.video.srcObject = null;
     torchEnabled = false;
-    detectorBusy = false;
-    readySince = 0;
-    detectedCorners = null;
-    displayCorners = null;
-    lastReliableCorners = null;
-    lastHandledDetectionId = 0;
-    if (detectorWorker) detectorWorker.postMessage({ type: "reset" });
+    stableCorners = [];
+    currentCorners = undefined;
+    requiresPageChange = false;
     elements.flashButton.disabled = true;
     elements.flashButton.textContent = "Flash";
     closeMenu();
@@ -306,7 +281,7 @@
     if (reviewUrl) URL.revokeObjectURL(reviewUrl); reviewUrl = undefined;
     if (processedReviewUrl) URL.revokeObjectURL(processedReviewUrl); processedReviewUrl = undefined;
     allPages().forEach(disposePage);
-    documentGroups = [[]]; processingQueue = []; processingBusy = false; pageSequence = 0; reviewPageId = null; flaggedReviewIds = []; finishing = false; lastCapturedFingerprint = null; lastCapturedGeometry = null; replacementDifferenceFrames = 0;
+    documentGroups = [[]]; processingQueue = []; processingBusy = false; pageSequence = 0; reviewPageId = null; flaggedReviewIds = []; finishing = false;
     generatedFiles.forEach(function (file) { URL.revokeObjectURL(file.url); });
     generatedFiles = [];
     stableCorners = [];
@@ -347,18 +322,20 @@
 
     elements.start.disabled = true;
     elements.start.textContent = "Opening camera...";
+    elements.manualCapture.disabled = true;
     setScreen("scanner");
     closeMenu();
     elements.status.textContent = "Opening camera...";
+    let sessionId;
     try {
       stopCamera();
-      const sessionId = cameraSessionId;
+      sessionId = cameraSessionId;
       const constraints = {
         audio: false,
         video: {
           facingMode: { ideal: cameraFacing },
-          width: { ideal: 3840 },
-          height: { ideal: 2160 }
+          width: { ideal: 1920 },
+          height: { ideal: 1920 }
         }
       };
       const openedStream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -366,19 +343,22 @@
       stream = openedStream;
       elements.video.srcObject = stream;
       await elements.video.play();
+      if (sessionId !== cameraSessionId) return;
       updateFlashControl();
       elements.manualCapture.disabled = true;
       elements.status.textContent = "Starting page detection...";
       waitForOpenCv().then(function () {
-        if (!stream) return;
+        if (!stream || sessionId !== cameraSessionId) return;
         elements.manualCapture.disabled = false;
         elements.status.textContent = "Finding a page...";
         startDetection();
       }).catch(function () {
+        if (sessionId !== cameraSessionId) return;
         elements.status.textContent = "Camera is ready, but page detection could not load.";
         showToast("The camera opened, but page detection did not load. Check your connection and reload.");
       });
     } catch (error) {
+      if (sessionId !== cameraSessionId) return;
       let message = "Could not open the camera. Try switching cameras or closing other camera apps.";
       if (error && error.name === "NotAllowedError") {
         message = "Camera permission was denied. Allow it in your browser settings and try again.";
@@ -499,114 +479,94 @@
     return movement / ((frames.length - 1) * 4);
   }
 
-  function fingerprintFromFrame(corners) {
-    if (!processContext || !corners) return null;
-    const minX = Math.max(0, Math.min.apply(null, corners.map(function (point) { return point.x; }))); const maxX = Math.min(1, Math.max.apply(null, corners.map(function (point) { return point.x; })));
-    const minY = Math.max(0, Math.min.apply(null, corners.map(function (point) { return point.y; }))); const maxY = Math.min(1, Math.max.apply(null, corners.map(function (point) { return point.y; })));
-    const width = Math.max(2, Math.round((maxX - minX) * processCanvas.width)); const height = Math.max(2, Math.round((maxY - minY) * processCanvas.height));
-    const canvas = document.createElement("canvas"); canvas.width = 9; canvas.height = 8; const context = canvas.getContext("2d", { willReadFrequently: true }); context.drawImage(processCanvas, Math.round(minX * processCanvas.width), Math.round(minY * processCanvas.height), width, height, 0, 0, 9, 8);
-    const data = context.getImageData(0, 0, 9, 8).data; const luma = []; let total = 0;
-    for (let index = 0; index < 72; index += 1) { const value = .299 * data[index * 4] + .587 * data[index * 4 + 1] + .114 * data[index * 4 + 2]; luma.push(value); total += value; }
-    let bits = ""; for (let y = 0; y < 8; y += 1) for (let x = 0; x < 8; x += 1) bits += luma[y * 9 + x] > luma[y * 9 + x + 1] ? "1" : "0";
-    return { bits: bits, mean: total / 72, aspect: width / height };
+  function normalizedPointsFromMat(mat, canvas, floating) {
+    const points = [];
+    for (let index = 0; index < 4; index += 1) {
+      const point = floating ? mat.floatPtr(index, 0) : mat.intPtr(index, 0);
+      points.push({ x: point[0] / canvas.width, y: point[1] / canvas.height });
+    }
+    return ScannerGeometry.orderCorners(points);
   }
 
-  function fingerprintDistance(one, two) {
-    if (!one || !two || Math.abs(one.aspect - two.aspect) / Math.max(one.aspect, two.aspect) > .18 || Math.abs(one.mean - two.mean) > 42) return 64;
-    let difference = 0; for (let index = 0; index < one.bits.length; index += 1) if (one.bits[index] !== two.bits[index]) difference += 1; return difference;
+  function rectangleScore(points) {
+    if (!points) return -Infinity;
+    const sides = [distance(points[0], points[1]), distance(points[1], points[2]), distance(points[2], points[3]), distance(points[3], points[0])];
+    if (Math.min.apply(null, sides) < .16 || Math.max.apply(null, sides) / Math.min.apply(null, sides) > 5) return -Infinity;
+    const area = Math.abs(ScannerGeometry.signedArea(points));
+    if (area < .07 || area > .96) return -Infinity;
+    const center = points.reduce(function (sum, point) { return { x: sum.x + point.x / 4, y: sum.y + point.y / 4 }; }, { x: 0, y: 0 });
+    return area * (1 - Math.min(.35, Math.hypot(center.x - .5, center.y - .5) * .35));
   }
 
-  function geometryForCorners(corners) {
-    return { centroid: corners.reduce(function (sum, point) { return { x: sum.x + point.x / 4, y: sum.y + point.y / 4 }; }, { x: 0, y: 0 }), area: Math.abs(ScannerGeometry.signedArea(corners)) };
+  function bestRectangleFromMask(mask, canvas) {
+    const contours = new cv.MatVector(); const hierarchy = new cv.Mat(); let best; let bestScore = -Infinity;
+    try {
+      cv.findContours(mask, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+      for (let index = 0; index < contours.size(); index += 1) {
+        const contour = contours.get(index); let approximation; let box;
+        try {
+          const contourArea = Math.abs(cv.contourArea(contour));
+          if (contourArea >= canvas.width * canvas.height * .055) {
+            const perimeter = cv.arcLength(contour, true); approximation = new cv.Mat(); cv.approxPolyDP(contour, approximation, .018 * perimeter, true); let points; let score = -Infinity;
+            if (approximation.rows === 4 && cv.isContourConvex(approximation)) { points = normalizedPointsFromMat(approximation, canvas, false); score = rectangleScore(points) + .15; }
+            else {
+              const rotatedRect = cv.minAreaRect(contour); const rotatedArea = rotatedRect.size.width * rotatedRect.size.height; const rectangularity = rotatedArea ? contourArea / rotatedArea : 0;
+              if (approximation.rows >= 3 && approximation.rows <= 6 && rectangularity > .32) { box = cv.boxPoints(rotatedRect); points = normalizedPointsFromMat(box, canvas, true); score = rectangleScore(points) * rectangularity; }
+            }
+            if (score > bestScore) { best = points; bestScore = score; }
+          }
+        } finally { if (box) box.delete(); if (approximation) approximation.delete(); contour.delete(); }
+      }
+      return best;
+    } finally { contours.delete(); hierarchy.delete(); }
   }
 
-  function rearmCapture() {
-    requiresPageChange = false; replacementDifferenceFrames = 0; pageAbsentSince = 0; stableCorners = []; readySince = 0; elements.status.textContent = "Hold steady";
-    if (DEBUG_MODE && performance.mark) performance.mark("scanner-rearmed");
+  function quadrilateralFromCanvas(canvas) {
+    const source = cv.imread(canvas); const gray = new cv.Mat(); const blurred = new cv.Mat(); const edges = new cv.Mat(); const connectedEdges = new cv.Mat(); const threshold = new cv.Mat(); const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
+    try {
+      cv.cvtColor(source, gray, cv.COLOR_RGBA2GRAY); cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0); cv.Canny(blurred, edges, 20, 90); cv.morphologyEx(edges, connectedEdges, cv.MORPH_CLOSE, kernel); cv.dilate(connectedEdges, connectedEdges, kernel);
+      let rectangle = bestRectangleFromMask(connectedEdges, canvas); if (rectangle) return rectangle;
+      cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU); cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel); rectangle = bestRectangleFromMask(threshold, canvas); if (rectangle) return rectangle;
+      cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU); cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel); return bestRectangleFromMask(threshold, canvas);
+    } finally { source.delete(); gray.delete(); blurred.delete(); edges.delete(); connectedEdges.delete(); threshold.delete(); kernel.delete(); }
   }
 
   function processFrame() {
-    if (appPhase !== "scanner" || !stream || elements.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || isCapturing || detectorBusy) return;
+    if (!opencvReady || appPhase !== "scanner" || !stream || elements.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || isCapturing) return;
     const videoWidth = elements.video.videoWidth;
     const videoHeight = elements.video.videoHeight;
     if (!videoWidth || !videoHeight) return;
     const scale = Math.min(1, PROCESSING_WIDTH / videoWidth);
-    const processingWidth = Math.round(videoWidth * scale);
-    const processingHeight = Math.round(videoHeight * scale);
-    if (processCanvas.width !== processingWidth || processCanvas.height !== processingHeight) {
-      processCanvas.width = processingWidth;
-      processCanvas.height = processingHeight;
-      processContext = processCanvas.getContext("2d", { willReadFrequently: true });
-    }
+    processCanvas.width = Math.round(videoWidth * scale); processCanvas.height = Math.round(videoHeight * scale); processContext = processCanvas.getContext("2d", { willReadFrequently: true });
     processContext.drawImage(elements.video, 0, 0, processCanvas.width, processCanvas.height);
-    if (!detectorWorker) {
+    let corners;
+    try { corners = quadrilateralFromCanvas(processCanvas); }
+    catch (error) {
       elements.status.textContent = "Use the capture button if page detection is unavailable.";
       return;
     }
-    detectorBusy = true;
-    const frameId = detectorRequestId += 1;
-    // ImageData works in Safari workers without relying on OffscreenCanvas support.
-    const imageData = processContext.getImageData(0, 0, processCanvas.width, processCanvas.height);
-    activeDetectorRequestId = frameId;
-    detectorWorker.postMessage({ type: "detect", id: frameId, sessionId: cameraSessionId, width: processCanvas.width, height: processCanvas.height, sentAt: performance.now(), buffer: imageData.data.buffer }, [imageData.data.buffer]);
-  }
-
-  function handleDetection(result) {
-    if (appPhase !== "scanner") { detectorBusy = false; return; }
-    if (result.id !== activeDetectorRequestId || result.sessionId !== cameraSessionId || result.id <= lastHandledDetectionId) return;
-    detectorBusy = false;
-    lastHandledDetectionId = result.id;
-    const corners = result.corners;
-    const confidence = result.confidence || 0;
-    lastDetectionConfidence = confidence;
-    lastDetectorMetrics = result.metrics;
-    detectedCorners = corners;
+    currentCorners = corners;
     if (!corners) {
-      currentCorners = null;
-      displayCorners = null;
+      currentCorners = pageGuideCorners();
       drawOutline(pageGuideCorners(), false, true);
       stableCorners = [];
-      readySince = 0;
-      if (requiresPageChange) {
-        if (!pageAbsentSince) pageAbsentSince = Date.now();
-        if (Date.now() - pageAbsentSince >= 300) rearmCapture();
-        else elements.status.textContent = "Replace the page";
-      } else if (!requiresPageChange) {
+      if (requiresPageChange && Date.now() - lastPageSeenAt > PAGE_REMOVED_DELAY) { requiresPageChange = false; elements.manualCapture.disabled = false; elements.status.textContent = "Ready for the next page."; }
+      else if (!requiresPageChange) {
         elements.status.textContent = "Finding page edges. Align it to the dashed " + guideLabel() + " guide.";
       }
       return;
     }
-    pageAbsentSince = 0;
-    const identityChanged = !displayCorners || Math.hypot(corners.reduce(function (sum, point) { return sum + point.x / 4; }, 0) - displayCorners.reduce(function (sum, point) { return sum + point.x / 4; }, 0), corners.reduce(function (sum, point) { return sum + point.y / 4; }, 0) - displayCorners.reduce(function (sum, point) { return sum + point.y / 4; }, 0)) > .12;
-    if (identityChanged) { displayCorners = corners.map(function (point) { return { x: point.x, y: point.y }; }); stableCorners = []; readySince = 0; }
-    else displayCorners = corners.map(function (point, index) { return { x: .38 * point.x + .62 * displayCorners[index].x, y: .38 * point.y + .62 * displayCorners[index].y }; });
-    currentCorners = corners;
-    if (confidence >= .62) lastReliableCorners = corners.map(function (point) { return { x: point.x, y: point.y }; });
     lastPageSeenAt = Date.now();
     if (requiresPageChange) {
-      const fingerprint = fingerprintFromFrame(corners); const geometry = geometryForCorners(corners); const centroidChange = lastCapturedGeometry ? distance(geometry.centroid, lastCapturedGeometry.centroid) : 0; const areaChange = lastCapturedGeometry ? Math.abs(geometry.area - lastCapturedGeometry.area) / Math.max(geometry.area, lastCapturedGeometry.area) : 0;
-      if (fingerprintDistance(fingerprint, lastCapturedFingerprint) >= REARM_DIFFERENCE || centroidChange >= .08 || areaChange >= .16) replacementDifferenceFrames += 1; else replacementDifferenceFrames = 0;
-      drawOutline(displayCorners, false); elements.status.textContent = "Replace the page";
-      if (replacementDifferenceFrames >= REARM_DIFFERENT_FRAMES) rearmCapture();
+      elements.manualCapture.disabled = true; drawOutline(corners, false); elements.status.textContent = "Move the page away, then show the next one.";
       return;
     }
-    stableCorners.push(displayCorners);
+    stableCorners.push(corners);
     if (stableCorners.length > AUTO_CAPTURE_STABLE_FRAMES) stableCorners.shift();
-    const areas = stableCorners.map(function (points) { return Math.abs(ScannerGeometry.signedArea(points)); });
-    const areaStable = areas.length && Math.max.apply(null, areas) - Math.min.apply(null, areas) < .025;
-    const stable = stableCorners.length >= AUTO_CAPTURE_STABLE_FRAMES && averageCornerMovement(stableCorners) < .005 && areaStable;
-    const qualityReady = lastDetectorMetrics && lastDetectorMetrics.areaRatio >= .16 && lastDetectorMetrics.borderMargin >= .008 && lastDetectorMetrics.blurScore >= 45 && lastDetectorMetrics.brightness >= 45 && lastDetectorMetrics.brightness <= 242 && lastDetectorMetrics.overexposure <= .28 && lastDetectorMetrics.underexposure <= .12 && lastDetectorMetrics.glareRatio <= .08;
-    if (stable && confidence >= .7 && qualityReady && !requiresPageChange) {
-      if (!readySince) readySince = Date.now();
-    } else {
-      readySince = 0;
-    }
-    drawOutline(displayCorners, stable && !requiresPageChange);
-    const ready = readySince && Date.now() - readySince >= 900;
-    let guidance = confidence < .48 ? "Finding page..." : (lastDetectorMetrics && lastDetectorMetrics.areaRatio < .16 ? "Move closer" : (!lastDetectorMetrics || lastDetectorMetrics.blurScore < 45 ? "Hold steady" : (lastDetectorMetrics.brightness < 45 ? "Too dark" : (lastDetectorMetrics.overexposure > .28 || lastDetectorMetrics.glareRatio > .08 ? "Reduce glare" : "Hold steady"))));
-    elements.status.textContent = ready ? "Ready. Capturing..." : guidance;
-    if (DEBUG_MODE) elements.status.textContent += " | confidence " + confidence.toFixed(2) + " | blur " + Math.round(lastDetectorMetrics.blurScore) + " | mask " + (result.diagnostics && result.diagnostics.maskUsed);
-    if (ready && elements.autoCapture.checked) { readySince = 0; captureCurrentPage(lastReliableCorners || corners, "auto"); }
+    const stable = stableCorners.length === AUTO_CAPTURE_STABLE_FRAMES && averageCornerMovement(stableCorners) < .008;
+    drawOutline(corners, stable);
+    elements.status.textContent = stable ? (elements.autoCapture.checked ? "Page ready. Capturing..." : "Page ready. Tap capture.") : "Hold steady to scan automatically...";
+    if (stable && elements.autoCapture.checked) captureCurrentPage(corners, "auto");
   }
 
   function distance(one, two) {
@@ -615,30 +575,18 @@
 
   function outputDimensions(corners, sourceWidth, sourceHeight) {
     const points = corners.map(function (point) { return { x: point.x * sourceWidth, y: point.y * sourceHeight }; });
-    const width = Math.max(distance(points[0], points[1]), distance(points[3], points[2]));
-    const height = Math.max(distance(points[0], points[3]), distance(points[1], points[2]));
-    const memory = navigator.deviceMemory || 4; const maximumDimension = memory <= 2 ? 2000 : (memory <= 4 ? 2800 : 3200);
-    const maximumPixels = memory <= 2 ? 4000000 : 8000000;
-    const scale = Math.min(1, maximumDimension / Math.max(width, height), Math.sqrt(maximumPixels / (width * height)));
+    const width = Math.max(distance(points[0], points[1]), distance(points[3], points[2])); const height = Math.max(distance(points[0], points[3]), distance(points[1], points[2])); const scale = Math.min(1, 3200 / Math.max(width, height), Math.sqrt(8000000 / (width * height)));
     return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+  }
+
+  function legalOutputDimensions(corners, sourceWidth, sourceHeight) {
+    const points = corners.map(function (point) { return { x: point.x * sourceWidth, y: point.y * sourceHeight }; }); const top = distance(points[0], points[1]); const bottom = distance(points[3], points[2]); const left = distance(points[0], points[3]); const right = distance(points[1], points[2]);
+    const ratio = Math.min(top, bottom) / Math.max(left, right);
+    return ratio > 1 ? { width: 2800, height: 1700 } : { width: 1700, height: 2800 };
   }
 
   function canvasToBlob(canvas, type, quality) {
     return new Promise(function (resolve, reject) { canvas.toBlob(function (blob) { blob ? resolve(blob) : reject(new Error("Image encoding failed")); }, type, quality); });
-  }
-
-  async function captureHighResolutionStill() {
-    const track = stream && stream.getVideoTracks()[0];
-    if (window.ImageCapture && track) {
-      try {
-        return await new ImageCapture(track).takePhoto();
-      } catch (error) { /* Use the intrinsic video fallback below. */ }
-    }
-    const canvas = document.createElement("canvas");
-    canvas.width = elements.video.videoWidth;
-    canvas.height = elements.video.videoHeight;
-    canvas.getContext("2d").drawImage(elements.video, 0, 0, canvas.width, canvas.height);
-    return canvasToBlob(canvas, "image/jpeg", .95);
   }
 
   async function decodeBlobToSource(blob) {
@@ -653,24 +601,6 @@
     } finally { URL.revokeObjectURL(url); }
   }
 
-  function qualityWarnings(metrics) {
-    const warnings = [];
-    if (!metrics) return ["No detector metrics"];
-    if (metrics.blurScore < 45) warnings.push("Blurry");
-    if (metrics.brightness < 45) warnings.push("Too dark");
-    if (metrics.overexposure > .28 || metrics.glareRatio > .08) warnings.push("Glare or overexposure");
-    if (metrics.borderMargin < SAFE_BORDER_MARGIN) warnings.push("Page may be clipped");
-    if (metrics.edgeScore < STRONG_EDGE_SUPPORT) warnings.push("Weak page edges");
-    return warnings;
-  }
-
-  function classifyCrop(confidence, corners, metrics, source) {
-    const valid = Boolean(corners && ScannerGeometry.validateQuad(corners)); const safe = metrics && metrics.borderMargin >= SAFE_BORDER_MARGIN; const strongEdges = metrics && metrics.edgeScore >= STRONG_EDGE_SUPPORT;
-    if (confidence >= HIGH_CONFIDENCE && valid && safe && strongEdges) return "accepted";
-    if (valid && confidence >= MEDIUM_CONFIDENCE) return "check";
-    return "needs-crop";
-  }
-
   function showCaptureFeedback(page) {
     clearTimeout(feedbackTimer); elements.captureFeedbackText.textContent = "Page " + totalPages() + " captured"; elements.captureFeedback.hidden = false;
     feedbackTimer = setTimeout(function () { elements.captureFeedback.hidden = true; }, 2800);
@@ -678,37 +608,32 @@
     if (navigator.vibrate) navigator.vibrate(35);
   }
 
-  async function makeImmediateThumbnail(page, corners) {
-    try {
-      const minX = Math.max(0, Math.min.apply(null, corners.map(function (point) { return point.x; }))); const maxX = Math.min(1, Math.max.apply(null, corners.map(function (point) { return point.x; })));
-      const minY = Math.max(0, Math.min.apply(null, corners.map(function (point) { return point.y; }))); const maxY = Math.min(1, Math.max.apply(null, corners.map(function (point) { return point.y; })));
-      const canvas = document.createElement("canvas"); canvas.width = 128; canvas.height = 160; canvas.getContext("2d").drawImage(processCanvas, minX * processCanvas.width, minY * processCanvas.height, Math.max(2, (maxX - minX) * processCanvas.width), Math.max(2, (maxY - minY) * processCanvas.height), 0, 0, canvas.width, canvas.height);
-      const revision = page.revision; const thumbnailBlob = await canvasToBlob(canvas, "image/jpeg", .72); if (!findPage(page.id) || page.revision !== revision || page.processedImage) return; page.thumbnailBlob = thumbnailBlob; if (page.thumbnailUrl) URL.revokeObjectURL(page.thumbnailUrl); page.thumbnailUrl = URL.createObjectURL(page.thumbnailBlob); renderFilmstrip();
-    } catch (error) { /* Placeholder remains until processing completes. */ }
-  }
-
   async function captureCurrentPage(corners, source) {
     if (isCapturing || finishing || totalPages() >= 50) return;
-    if (processingQueue.length >= MAX_PROCESS_QUEUE) { if (source === "manual") showToast("Still processing previous pages."); elements.status.textContent = "Processing previous pages..."; return; }
     isCapturing = true;
-    elements.status.textContent = "Capturing high-resolution still...";
-    const started = performance.now(); const generation = sessionGeneration; const targetGroup = currentGroup(); const previewWidth = elements.video.videoWidth; const previewHeight = elements.video.videoHeight;
+    elements.status.textContent = "Processing page...";
+    const started = performance.now(); const captureSessionId = cameraSessionId; const targetGroup = currentGroup(); const mats = [];
     const chosenCorners = corners && ScannerGeometry.validateQuad(corners) ? corners.map(function (point) { return { x: point.x, y: point.y }; }) : pageGuideCorners();
-    const fingerprint = fingerprintFromFrame(chosenCorners); const detectionConfidence = source === "manual" ? lastDetectionConfidence : lastDetectionConfidence; const metrics = lastDetectorMetrics ? Object.assign({}, lastDetectorMetrics) : null; const mode = elements.scanMode.value;
     try {
-      const originalImage = await captureHighResolutionStill();
-      if (generation !== sessionGeneration) return;
-      if (source === "auto" && fingerprintDistance(fingerprint, lastCapturedFingerprint) <= DUPLICATE_DISTANCE) { showToast("Page already captured"); return; }
-      const duplicateDistance = fingerprintDistance(fingerprint, lastCapturedFingerprint); const warnings = qualityWarnings(metrics); let cropStatus = classifyCrop(detectionConfidence, corners, metrics, source); if (source !== "auto" && duplicateDistance <= DUPLICATE_DISTANCE) { cropStatus = cropStatus === "needs-crop" ? cropStatus : "check"; warnings.push("Possible duplicate page"); }
-      const page = { id: makeId(), revision: 1, sequence: pageSequence += 1, originalImage: originalImage, detectedCorners: chosenCorners, refinedCorners: null, finalCorners: chosenCorners, detectionConfidence: detectionConfidence, refinementConfidence: 0, cropStatus: cropStatus, qualityWarnings: warnings, processedImage: null, processedMimeType: null, processedWidth: 0, processedHeight: 0, rotation: 0, scanMode: mode, status: "captured", fingerprint: fingerprint, previewWidth: previewWidth, previewHeight: previewHeight, sourceWidth: 0, sourceHeight: 0, thumbnailBlob: null, thumbnailUrl: null, processingAttempts: 0, timings: { stillCaptureMs: performance.now() - started }, cancelled: false };
-      page.createdAt = started;
-      targetGroup.push(page); requiresPageChange = true; lastCapturedFingerprint = fingerprint; lastCapturedGeometry = geometryForCorners(chosenCorners); replacementDifferenceFrames = 0; pageAbsentSince = 0; stableCorners = []; readySince = 0;
-      makeImmediateThumbnail(page, chosenCorners); updateControls(); showCaptureFeedback(page); elements.status.textContent = "Replace the page";
-      processingQueue.push({ pageId: page.id, revision: page.revision, generation: sessionGeneration }); pumpProcessingQueue();
-      if (DEBUG_MODE) console.debug("capture admitted", page.id, page.timings);
+      const videoWidth = elements.video.videoWidth; const videoHeight = elements.video.videoHeight; sourceCanvas.width = videoWidth; sourceCanvas.height = videoHeight; sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(elements.video, 0, 0, videoWidth, videoHeight);
+      const dimensions = legalOutputDimensions(chosenCorners, videoWidth, videoHeight); const input = cv.imread(sourceCanvas); const warped = new cv.Mat(); const gray = new cv.Mat(); const blackAndWhite = new cv.Mat(); mats.push(input, warped, gray, blackAndWhite);
+      const sourcePoints = []; chosenCorners.forEach(function (point) { sourcePoints.push(point.x * videoWidth, point.y * videoHeight); });
+      const sourceMat = cv.matFromArray(4, 1, cv.CV_32FC2, sourcePoints); const destinationMat = cv.matFromArray(4, 1, cv.CV_32FC2, [0,0,dimensions.width-1,0,dimensions.width-1,dimensions.height-1,0,dimensions.height-1]); const transform = cv.getPerspectiveTransform(sourceMat, destinationMat); mats.push(sourceMat, destinationMat, transform);
+      cv.warpPerspective(input, warped, transform, new cv.Size(dimensions.width, dimensions.height), cv.INTER_LINEAR, cv.BORDER_REPLICATE); cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); cv.adaptiveThreshold(gray, blackAndWhite, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 31, 12);
+      outputCanvas.width = dimensions.width; outputCanvas.height = dimensions.height; cv.imshow(outputCanvas, blackAndWhite); const blob = await canvasToBlob(outputCanvas, "image/png");
+      if (captureSessionId !== cameraSessionId) return;
+      const thumbnailCanvas = document.createElement("canvas"); const thumbnailScale = 200 / Math.max(dimensions.width, dimensions.height); thumbnailCanvas.width = Math.round(dimensions.width * thumbnailScale); thumbnailCanvas.height = Math.round(dimensions.height * thumbnailScale); thumbnailCanvas.getContext("2d").drawImage(outputCanvas, 0, 0, thumbnailCanvas.width, thumbnailCanvas.height); const thumbnailBlob = await canvasToBlob(thumbnailCanvas, "image/jpeg", .72);
+      if (captureSessionId !== cameraSessionId) return;
+      const fullImage = [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}];
+      const page = { id: makeId(), revision: 1, sequence: pageSequence += 1, createdAt: started, originalImage: blob, detectedCorners: fullImage, refinedCorners: fullImage, finalCorners: fullImage, cornersAreStill: true, detectionConfidence: 1, refinementConfidence: 1, cropStatus: "accepted", qualityWarnings: [], processedImage: blob, processedMimeType: "image/png", processedWidth: dimensions.width, processedHeight: dimensions.height, rotation: 0, scanMode: "black-and-white", status: "ready", cameraCapture: true, previewWidth: dimensions.width, previewHeight: dimensions.height, sourceWidth: dimensions.width, sourceHeight: dimensions.height, thumbnailBlob: thumbnailBlob, thumbnailUrl: URL.createObjectURL(thumbnailBlob), processingAttempts: 0, timings: { totalReadyMs: performance.now() - started }, cancelled: false };
+      targetGroup.push(page); requiresPageChange = true; lastPageSeenAt = Date.now(); stableCorners = [];
+      elements.manualCapture.disabled = true; updateControls(); showCaptureFeedback(page); elements.status.textContent = "Move the page away, then show the next one.";
+      setTimeout(function () { if (requiresPageChange) elements.status.textContent = "Move the page away, then show the next one."; }, PAGE_CHANGE_DELAY);
     } catch (error) {
-      showToast("Could not capture the high-resolution image. Try again.");
-    } finally { isCapturing = false; if (finishing) maybeCompleteFinish(); if (DEBUG_MODE) console.debug("camera rearmed after", Math.round(performance.now() - started), "ms"); }
+      showToast("Could not process this page. Try the capture button again."); elements.status.textContent = "Ready to try again.";
+    } finally {
+      mats.reverse().forEach(function (mat) { if (mat) mat.delete(); }); sourceCanvas.width = 1; sourceCanvas.height = 1; outputCanvas.width = 1; outputCanvas.height = 1; isCapturing = false; if (finishing) maybeCompleteFinish();
+    }
   }
 
   function processingJobMatches(job) {
@@ -765,7 +690,6 @@
       if (result.refinementConflict && page.cropStatus === "accepted" && !page.cropManuallyAccepted) { page.cropStatus = "check"; page.qualityWarnings.push("Corner refinement disagreed"); }
       page.status = "ready"; page.timings = Object.assign(page.timings, result.timings, { encodingMs: performance.now() - encodingStarted, totalReadyMs: performance.now() - (page.createdAt || encodingStarted) });
       canvas.width = 0; canvas.height = 0; thumb.width = 0; thumb.height = 0; renderFilmstrip(); updateControls();
-      if (DEBUG_MODE) console.debug("page ready", page.id, page.timings);
     } catch (error) { failure = error; }
     if (failure) { handleProcessingFailure(page, result, failure); return; }
     releaseProcessingJob(result);
@@ -916,6 +840,7 @@
       let editorCorners = page.finalCorners || page.detectedCorners || [{x:.03,y:.03},{x:.97,y:.03},{x:.97,y:.97},{x:.03,y:.97}];
       if (!page.cornersAreStill && page.previewWidth && page.previewHeight) editorCorners = mapPreviewCornersToStill(editorCorners, page.previewWidth, page.previewHeight, pendingCapture.width, pendingCapture.height);
       reviewCorners = editorCorners.map(function (point) { return { x: point.x, y: point.y }; }); initialReviewCorners = reviewCorners.map(function (point) { return { x: point.x, y: point.y }; }); elements.reviewMode.value = page.scanMode; elements.reviewTitle.textContent = "Review page " + page.sequence;
+      elements.reviewMode.disabled = Boolean(page.cameraCapture);
       const displayBlob = reviewRotation ? await bitmapToBlob(pendingCapture) : page.originalImage;
       if (generation !== reviewGeneration || reviewPageId !== pageId) return;
       if (reviewUrl) URL.revokeObjectURL(reviewUrl); reviewUrl = URL.createObjectURL(displayBlob); elements.reviewImage.src = reviewUrl;
@@ -944,15 +869,15 @@
     renderFilmstrip(); pumpProcessingQueue();
     const wasFlaggedReview = reviewReturnPhase === "flagged-review"; reviewPageId = null;
     if (wasFlaggedReview) openNextFlaggedPage(); else setScreen(stream ? "scanner" : "welcome");
-    stableCorners = []; readySince = 0;
+    stableCorners = [];
   }
 
   function retakeReview() {
     reviewGeneration += 1;
     if (reviewPageId) removePageById(reviewPageId);
     cleanupReview();
-    reviewPageId = null; finishing = false; if (stream) setScreen("scanner"); else startCamera();
-    stableCorners = []; readySince = 0;
+    reviewPageId = null; finishing = false; requiresPageChange = false; if (stream) { elements.manualCapture.disabled = false; setScreen("scanner"); } else startCamera();
+    stableCorners = [];
   }
 
   function deleteReviewedPage() {
@@ -1006,7 +931,9 @@
   }
 
   function manualCapture() {
-    captureCurrentPage(lastReliableCorners || currentCorners, "manual");
+    if (requiresPageChange) { showToast("Move the current page away before capturing the next one."); return; }
+    if (!currentCorners) showToast("Using the Legal guide. Keep the page inside its dashed border.");
+    captureCurrentPage(currentCorners || pageGuideCorners(), "manual");
   }
 
   async function openCameraFile(file) {
@@ -1024,6 +951,7 @@
         const page = documentGroups[index].pop(); page.cancelled = true; disposePage(page); processingQueue = processingQueue.filter(function (job) { return job.pageId !== page.id; });
         if (documentGroups[index].length === 0 && index === documentGroups.length - 1 && documentGroups.length > 1) documentGroups.pop();
         requiresPageChange = false;
+        if (stream) elements.manualCapture.disabled = false;
         stableCorners = [];
         updateControls();
         showToast("Last page removed."); elements.captureFeedback.hidden = true;
@@ -1255,33 +1183,6 @@
     clearTimeout(detectionTimer);
     if (!document.hidden && appPhase === "scanner" && stream) startDetection();
   });
-  function startDetectorWorker() {
-    if (typeof Worker !== "function") return;
-    const worker = new Worker("detector-worker.js"); detectorWorker = worker;
-    worker.onmessage = function (event) {
-      if (event.data.type === "result") handleDetection(event.data);
-      if (event.data.type === "error") {
-        detectorBusy = false;
-        elements.status.textContent = "Use the capture button if page detection is unavailable.";
-        showToast("Detector error: " + event.data.message);
-      }
-    };
-    function handleDetectorCrash() {
-      if (detectorWorker !== worker) return;
-      worker.terminate(); detectorWorker = null; detectorBusy = false;
-      if (detectorWorkerRestarts < 1) {
-        detectorWorkerRestarts += 1; startDetectorWorker();
-        if (appPhase === "scanner" && stream) startDetection();
-        return;
-      }
-      detectorBusy = false;
-      elements.status.textContent = "Use the capture button if page detection is unavailable.";
-      showToast("Automatic detection is unavailable. Manual capture is still ready.");
-    }
-    worker.onerror = handleDetectorCrash;
-    worker.onmessageerror = handleDetectorCrash;
-  }
-
   function startProcessingWorker() {
     if (typeof Worker !== "function") return;
     const worker = new Worker("processing-worker.js"); processingWorker = worker; processingWorkerReady = false;
@@ -1310,7 +1211,6 @@
     worker.onmessageerror = handleProcessingCrash;
     processingReadyTimer = setTimeout(handleProcessingCrash, 15000);
   }
-  startDetectorWorker();
   startProcessingWorker();
   updateControls();
   setTimeout(startCamera, 0);
