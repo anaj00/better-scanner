@@ -61,7 +61,7 @@ function processMode(warped, mode, mats) {
   if (mode === "original") { const output = warped.clone(); mats.push(output); return output; }
   const gray = new cv.Mat(); mats.push(gray); cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY);
   if (mode === "grayscale") return gray;
-  const denoised = new cv.Mat(); const output = new cv.Mat(); mats.push(denoised, output); cv.medianBlur(gray, denoised, 3); denoised.convertTo(output, -1, 1.08, -6); return output;
+  const background = new cv.Mat(); const normalized = new cv.Mat(); const denoised = new cv.Mat(); const output = new cv.Mat(); mats.push(background, normalized, denoised, output); cv.GaussianBlur(gray, background, new cv.Size(0, 0), Math.max(18, Math.round(Math.max(warped.rows, warped.cols) / 35))); cv.divide(gray, background, normalized, 235); cv.medianBlur(normalized, denoised, 3); denoised.convertTo(output, -1, 1.05, -3); return output;
 }
 
 function processJob(job) {

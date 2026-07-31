@@ -7,10 +7,10 @@ Client-only mobile document scanner using browser camera APIs, OpenCV.js, pdf-li
 1. `app.js` analyzes camera frames at a bounded 720px width using OpenCV.js on the main thread.
 2. Detection tries connected Canny edges, normal Otsu thresholding, and inverse Otsu thresholding.
 3. It accepts the best page-like contour or rectangular fallback without confidence scoring or image fingerprinting.
-4. Auto-capture requires three detected frames with average corner movement below `0.008`.
+4. Auto-capture requires two detected frames with average corner movement below `0.008`; detection runs every 100ms.
 5. Capture immediately perspective-corrects the intrinsic video frame while preserving the detected rectangle's natural aspect ratio and review image.
 6. The camera rearms after the page has been absent for 650ms. Users can continue scanning into the current filmstrip or start another document.
-7. Original mode exports the exact preserved review image. Grayscale preserves natural luminance, while B&W applies only mild denoising and contrast. `processing-worker.js` is reserved for imported images and explicit filmstrip edits.
+7. Original mode exports the exact preserved review image. Grayscale preserves natural luminance, while B&W gently normalizes page lighting and applies mild denoising and contrast. `processing-worker.js` is reserved for imported images and explicit filmstrip edits.
 8. Every scan is centered and aspect-fitted without stretching onto a US Legal PDF page. PDFs can be shared separately or bundled into a ZIP.
 
 ## Run
