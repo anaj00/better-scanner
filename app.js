@@ -508,20 +508,9 @@
     }
     detectorBusy = true;
     const frameId = detectorRequestId += 1;
-    const postFrame = function (frame) {
-      detectorWorker.postMessage({ id: frameId, width: processCanvas.width, height: processCanvas.height, ...frame }, frame.bitmap ? [frame.bitmap] : []);
-    };
-    if (typeof createImageBitmap === "function") {
-      createImageBitmap(processCanvas).then(function (bitmap) {
-        postFrame({ bitmap: bitmap });
-      }).catch(function () {
-        const imageData = processContext.getImageData(0, 0, processCanvas.width, processCanvas.height);
-        postFrame({ imageData: imageData });
-      });
-    } else {
-      const imageData = processContext.getImageData(0, 0, processCanvas.width, processCanvas.height);
-      postFrame({ imageData: imageData });
-    }
+    // ImageData works in Safari workers without relying on OffscreenCanvas support.
+    const imageData = processContext.getImageData(0, 0, processCanvas.width, processCanvas.height);
+    detectorWorker.postMessage({ id: frameId, width: processCanvas.width, height: processCanvas.height, imageData: imageData });
   }
 
   function handleDetection(corners) {
@@ -840,11 +829,20 @@
   if (detectorWorker) {
     detectorWorker.onmessage = function (event) {
       if (event.data.type === "result") handleDetection(event.data.corners);
+      if (event.data.type === "error") {
+        detectorBusy = false;
+        elements.status.textContent = "Use the capture button if page detection is unavailable.";
+        showToast("Detector error: " + event.data.message);
+      }
     };
     detectorWorker.onerror = function () {
       detectorBusy = false;
       elements.status.textContent = "Use the capture button if page detection is unavailable.";
       showToast("Automatic detection is unavailable. Manual capture is still ready.");
+    };
+    detectorWorker.onmessageerror = function () {
+      detectorBusy = false;
+      showToast("The camera frame could not be sent to the detector. Try reloading the page.");
     };
   }
   updateControls();

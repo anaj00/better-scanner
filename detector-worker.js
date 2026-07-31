@@ -115,24 +115,22 @@ function findPage(mask, width, height) {
 }
 
 function detect(frame) {
-  const canvas = new OffscreenCanvas(frame.width, frame.height);
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  if (frame.bitmap) {
-    context.drawImage(frame.bitmap, 0, 0);
-    frame.bitmap.close();
-  } else {
-    context.putImageData(frame.imageData, 0, 0);
-  }
-
-  const source = cv.imread(canvas);
-  const gray = new cv.Mat();
-  const blurred = new cv.Mat();
-  const edges = new cv.Mat();
-  const closed = new cv.Mat();
-  const threshold = new cv.Mat();
-  const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+  let source;
+  let gray;
+  let blurred;
+  let edges;
+  let closed;
+  let threshold;
+  let kernel;
   let corners;
   try {
+    source = cv.matFromImageData(frame.imageData);
+    gray = new cv.Mat();
+    blurred = new cv.Mat();
+    edges = new cv.Mat();
+    closed = new cv.Mat();
+    threshold = new cv.Mat();
+    kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
     cv.cvtColor(source, gray, cv.COLOR_RGBA2GRAY);
     cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
     cv.Canny(blurred, edges, 20, 90);
@@ -144,13 +142,11 @@ function detect(frame) {
       corners = findPage(threshold, frame.width, frame.height);
     }
     self.postMessage({ type: "result", id: frame.id, corners: corners || null });
+  } catch (error) {
+    self.postMessage({ type: "error", id: frame.id, message: error && error.message ? error.message : "Detector error" });
   } finally {
-    source.delete();
-    gray.delete();
-    blurred.delete();
-    edges.delete();
-    closed.delete();
-    threshold.delete();
-    kernel.delete();
+    [source, gray, blurred, edges, closed, threshold, kernel].forEach(function (mat) {
+      if (mat) mat.delete();
+    });
   }
 }
