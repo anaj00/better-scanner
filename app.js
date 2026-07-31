@@ -1,12 +1,12 @@
-/* global cv, PDFLib */
+/* global cv, PDFLib, JSZip */
 (function () {
   "use strict";
 
-  const PROCESSING_WIDTH = 720;
-  const AUTO_CAPTURE_STABLE_FRAMES = 3;
-  const DETECTION_INTERVAL = 130;
-  const PAGE_REMOVED_DELAY = 650;
-  const PAGE_CHANGE_DELAY = 900;
+  const PROCESSING_WIDTH = 600;
+  const AUTO_CAPTURE_STABLE_FRAMES = 2;
+  const DETECTION_INTERVAL = 100;
+  const PAGE_REMOVED_DELAY = 350;
+  const PAGE_CHANGE_DELAY = 450;
   const DPI = 200;
 
   const elements = {
@@ -20,6 +20,7 @@
     outline: document.querySelector("#outline-canvas"),
     status: document.querySelector("#camera-status"),
     switchCamera: document.querySelector("#switch-camera-button"),
+    flashButton: document.querySelector("#flash-button"),
     manualCapture: document.querySelector("#manual-capture-button"),
     undo: document.querySelector("#undo-button"),
     newDocument: document.querySelector("#new-document-button"),
@@ -27,9 +28,11 @@
     documentCount: document.querySelector("#document-count"),
     pageCount: document.querySelector("#page-count"),
     pageSize: document.querySelector("#page-size-select"),
+    scanMode: document.querySelector("#scan-mode-select"),
     flash: document.querySelector("#capture-flash"),
     resultTitle: document.querySelector("#results-title"),
     resultList: document.querySelector("#results-list"),
+    downloadZip: document.querySelector("#download-zip-button"),
     toast: document.querySelector("#toast"),
     secureNote: document.querySelector("#secure-context-note")
   };
@@ -46,6 +49,7 @@
   let documentGroups = [[]];
   let generatedFiles = [];
   let toastTimer;
+  let torchEnabled = false;
 
   const processCanvas = document.createElement("canvas");
   const sourceCanvas = document.createElement("canvas");
@@ -91,6 +95,32 @@
       stream = undefined;
     }
     elements.video.srcObject = null;
+    torchEnabled = false;
+    elements.flashButton.disabled = true;
+    elements.flashButton.textContent = "Flash";
+  }
+
+  function updateFlashControl() {
+    const track = stream && stream.getVideoTracks()[0];
+    const capabilities = track && track.getCapabilities ? track.getCapabilities() : undefined;
+    const supported = Boolean(capabilities && capabilities.torch);
+    elements.flashButton.disabled = !supported;
+    elements.flashButton.textContent = torchEnabled ? "Flash on" : "Flash";
+    elements.flashButton.title = supported ? "Toggle camera flash" : "Flash is not available in this browser";
+  }
+
+  async function toggleFlash() {
+    const track = stream && stream.getVideoTracks()[0];
+    if (!track || !track.applyConstraints) return;
+    try {
+      const nextValue = !torchEnabled;
+      await track.applyConstraints({ advanced: [{ torch: nextValue }] });
+      torchEnabled = nextValue;
+      updateFlashControl();
+    } catch (error) {
+      showToast("Flash is not available for this camera in this browser.");
+      updateFlashControl();
+    }
   }
 
   function resetSession() {
@@ -149,6 +179,7 @@
       stream = await navigator.mediaDevices.getUserMedia(constraints);
       elements.video.srcObject = stream;
       await elements.video.play();
+      updateFlashControl();
       setScreen("scanner");
       elements.manualCapture.disabled = true;
       elements.status.textContent = "Starting page detection...";
@@ -438,7 +469,7 @@
     lastPageSeenAt = Date.now();
     stableCorners.push(corners);
     if (stableCorners.length > AUTO_CAPTURE_STABLE_FRAMES) stableCorners.shift();
-    const stable = stableCorners.length === AUTO_CAPTURE_STABLE_FRAMES && averageCornerMovement(stableCorners) < .008;
+    const stable = stableCorners.length === AUTO_CAPTURE_STABLE_FRAMES && averageCornerMovement(stableCorners) < .005;
     drawOutline(corners, stable && !requiresPageChange);
     if (requiresPageChange) {
       elements.status.textContent = "Move the page away, then show the next one.";
@@ -512,14 +543,17 @@
       const transform = cv.getPerspectiveTransform(sourceMat, destinationMat);
       cv.warpPerspective(source, warped, transform, new cv.Size(dimensions.width, dimensions.height), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
       cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY);
-      cv.adaptiveThreshold(gray, blackAndWhite, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 31, 12);
+      if (elements.scanMode.value === "black-and-white") {
+        cv.adaptiveThreshold(gray, blackAndWhite, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 31, 12);
+      }
       outputCanvas.width = dimensions.width;
       outputCanvas.height = dimensions.height;
-      cv.imshow(outputCanvas, blackAndWhite);
+      const output = elements.scanMode.value === "color" ? warped : (elements.scanMode.value === "grayscale" ? gray : blackAndWhite);
+      cv.imshow(outputCanvas, output);
       const blob = await canvasToBlob(outputCanvas);
       source.delete(); warped.delete(); gray.delete(); blackAndWhite.delete(); sourceMat.delete(); destinationMat.delete(); transform.delete();
       if (!blob) throw new Error("Image conversion failed");
-      currentGroup().push({ blob: blob, width: dimensions.width, height: dimensions.height });
+      currentGroup().push({ blob: blob, width: dimensions.width, height: dimensions.height, mode: elements.scanMode.value });
       requiresPageChange = true;
       lastPageSeenAt = Date.now();
       stableCorners = [];
@@ -589,7 +623,13 @@
         const bytes = await pdf.save();
         const fileName = "scan-document-" + String(groupIndex + 1).padStart(2, "0") + ".pdf";
         const blob = new Blob([bytes], { type: "application/pdf" });
-        generatedFiles.push({ name: fileName, pages: groups[groupIndex].length, blob: blob, url: URL.createObjectURL(blob) });
+        generatedFiles.push({
+          name: fileName,
+          pages: groups[groupIndex].length,
+          modes: groups[groupIndex].map(function (scan) { return scan.mode; }),
+          blob: blob,
+          url: URL.createObjectURL(blob)
+        });
       }
       stopCamera();
       renderResults();
@@ -612,7 +652,9 @@
       const title = document.createElement("h3");
       title.textContent = "Document " + (index + 1);
       const note = document.createElement("p");
-      note.textContent = file.pages + " " + (file.pages === 1 ? "page" : "pages") + " - black and white - 200 DPI";
+      const modes = new Set(file.modes);
+      const mode = modes.size === 1 ? Array.from(modes)[0].replaceAll("-", " ") : "mixed modes";
+      note.textContent = file.pages + " " + (file.pages === 1 ? "page" : "pages") + " - " + mode + " - 200 DPI";
       details.append(title, note);
       const actions = document.createElement("div");
       actions.className = "result-actions";
@@ -632,6 +674,49 @@
       card.append(details, actions);
       elements.resultList.append(card);
     });
+  }
+
+  function downloadBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const download = document.createElement("a");
+    download.href = url;
+    download.download = name;
+    document.body.append(download);
+    download.click();
+    download.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+  }
+
+  async function downloadZip() {
+    if (!generatedFiles.length || !window.JSZip) {
+      showToast("ZIP download is not available. Check your connection and try again.");
+      return;
+    }
+    const originalText = elements.downloadZip.textContent;
+    elements.downloadZip.disabled = true;
+    elements.downloadZip.textContent = "Preparing ZIP...";
+    try {
+      const zip = new JSZip();
+      generatedFiles.forEach(function (file) { zip.file(file.name, file.blob); });
+      const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
+      const name = "scanned-documents.zip";
+      const file = new File([blob], name, { type: "application/zip" });
+      if (navigator.share && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
+        try {
+          await navigator.share({ title: "Scanned documents", files: [file] });
+          return;
+        } catch (error) {
+          if (error && error.name === "AbortError") return;
+        }
+      }
+      downloadBlob(blob, name);
+      showToast("ZIP download started.");
+    } catch (error) {
+      showToast("Could not create the ZIP. Try downloading the PDFs separately.");
+    } finally {
+      elements.downloadZip.disabled = false;
+      elements.downloadZip.textContent = originalText;
+    }
   }
 
   async function shareFile(result) {
@@ -658,6 +743,8 @@
   elements.undo.addEventListener("click", undoPage);
   elements.newDocument.addEventListener("click", newDocument);
   elements.finish.addEventListener("click", generatePdfs);
+  elements.flashButton.addEventListener("click", toggleFlash);
+  elements.downloadZip.addEventListener("click", downloadZip);
   elements.switchCamera.addEventListener("click", function () {
     cameraFacing = cameraFacing === "environment" ? "user" : "environment";
     startCamera();
