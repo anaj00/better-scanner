@@ -6,7 +6,7 @@ Client-only mobile document scanner using browser camera APIs, OpenCV.js, pdf-li
 
 1. `app.js` analyzes camera frames at a bounded 720px width using OpenCV.js on the main thread.
 2. Detection tries connected Canny edges, normal Otsu thresholding, and inverse Otsu thresholding.
-3. It prefers a complete page contour, then accepts a conservative min-area rectangle inferred from two or three substantial connected edges. Threshold-mask fallbacks still require a filled page-like contour.
+3. It accepts the best complete page-like contour or rectangular fallback without confidence scoring or image fingerprinting.
 4. Auto-capture waits 700ms for initial autofocus, then holds each stable page for another 350ms so iPhone autofocus can settle before capture. Detection runs every 100ms.
 5. Capture prefers a full-resolution `ImageCapture.takePhoto()` still, maps the preview corners onto it, and falls back to a high-resolution video frame when unsupported. Perspective correction compensates for opposite-edge foreshortening while preserving arbitrary document aspect ratios.
 6. The camera rearms after the page has been absent for 650ms. Users can continue scanning into the current filmstrip or start another document.

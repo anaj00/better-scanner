@@ -512,21 +512,21 @@
     return area * (1 - Math.min(.35, Math.hypot(center.x - .5, center.y - .5) * .35));
   }
 
-  function bestRectangleFromMask(mask, canvas, allowPartialEdges) {
+  function bestRectangleFromMask(mask, canvas) {
     const contours = new cv.MatVector(); const hierarchy = new cv.Mat(); let best; let bestScore = -Infinity;
     try {
       cv.findContours(mask, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
       for (let index = 0; index < contours.size(); index += 1) {
         const contour = contours.get(index); let approximation; let box;
         try {
-          const contourArea = Math.abs(cv.contourArea(contour)); const frameArea = canvas.width * canvas.height; const perimeter = cv.arcLength(contour, true); const substantialContour = contourArea >= frameArea * .055; const substantialPartialEdges = allowPartialEdges && perimeter >= Math.min(canvas.width, canvas.height) * .65;
-          if (substantialContour || substantialPartialEdges) {
+          const contourArea = Math.abs(cv.contourArea(contour));
+          if (contourArea >= canvas.width * canvas.height * .055) {
+            const perimeter = cv.arcLength(contour, true);
             approximation = new cv.Mat(); cv.approxPolyDP(contour, approximation, .018 * perimeter, true); let points; let score = -Infinity;
             if (approximation.rows === 4 && cv.isContourConvex(approximation)) { points = normalizedPointsFromMat(approximation, canvas, false); score = rectangleScore(points) + .15; }
             else {
               const rotatedRect = cv.minAreaRect(contour); const rotatedArea = rotatedRect.size.width * rotatedRect.size.height; const rectangularity = rotatedArea ? contourArea / rotatedArea : 0;
-              const rectanglePerimeter = 2 * (rotatedRect.size.width + rotatedRect.size.height); const perimeterCoverage = rectanglePerimeter ? perimeter / rectanglePerimeter : 0; const regularFallback = approximation.rows >= 3 && approximation.rows <= 6 && rectangularity > .32; const partialFallback = allowPartialEdges && approximation.rows >= 2 && approximation.rows <= 10 && rotatedArea >= frameArea * .1 && perimeterCoverage >= .35;
-              if (regularFallback || partialFallback) { box = cv.boxPoints(rotatedRect); points = normalizedPointsFromMat(box, canvas, true); score = rectangleScore(points) * (regularFallback ? rectangularity : Math.min(.78, perimeterCoverage * .7)); }
+              if (approximation.rows >= 3 && approximation.rows <= 6 && rectangularity > .32) { box = cv.boxPoints(rotatedRect); points = normalizedPointsFromMat(box, canvas, true); score = rectangleScore(points) * rectangularity; }
             }
             if (score > bestScore) { best = points; bestScore = score; }
           }
@@ -540,9 +540,9 @@
     const source = cv.imread(canvas); const gray = new cv.Mat(); const blurred = new cv.Mat(); const edges = new cv.Mat(); const connectedEdges = new cv.Mat(); const threshold = new cv.Mat(); const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
     try {
       cv.cvtColor(source, gray, cv.COLOR_RGBA2GRAY); cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0); cv.Canny(blurred, edges, 20, 90); cv.morphologyEx(edges, connectedEdges, cv.MORPH_CLOSE, kernel); cv.dilate(connectedEdges, connectedEdges, kernel);
-      let rectangle = bestRectangleFromMask(connectedEdges, canvas, true); if (rectangle) return rectangle;
-      cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU); cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel); rectangle = bestRectangleFromMask(threshold, canvas, false); if (rectangle) return rectangle;
-      cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU); cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel); return bestRectangleFromMask(threshold, canvas, false);
+      let rectangle = bestRectangleFromMask(connectedEdges, canvas); if (rectangle) return rectangle;
+      cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU); cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel); rectangle = bestRectangleFromMask(threshold, canvas); if (rectangle) return rectangle;
+      cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU); cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel); return bestRectangleFromMask(threshold, canvas);
     } finally { source.delete(); gray.delete(); blurred.delete(); edges.delete(); connectedEdges.delete(); threshold.delete(); kernel.delete(); }
   }
 
