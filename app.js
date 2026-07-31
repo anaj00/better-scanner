@@ -239,42 +239,121 @@
     return [topLeft, topRight, bottomRight, bottomLeft];
   }
 
-  function quadrilateralFromCanvas(canvas) {
-    const src = cv.imread(canvas);
-    const gray = new cv.Mat();
-    const blurred = new cv.Mat();
-    const edges = new cv.Mat();
+  function normalizedPointsFromMat(mat, canvas, isFloat) {
+    const points = [];
+    for (let index = 0; index < 4; index += 1) {
+      const point = isFloat ? mat.floatPtr(index, 0) : mat.intPtr(index, 0);
+      points.push({
+        x: point[0] / canvas.width,
+        y: point[1] / canvas.height
+      });
+    }
+    return orderCorners(points);
+  }
+
+  function rectangleScore(points) {
+    const top = distance(points[0], points[1]);
+    const right = distance(points[1], points[2]);
+    const bottom = distance(points[2], points[3]);
+    const left = distance(points[3], points[0]);
+    const shortestSide = Math.min(top, right, bottom, left);
+    const longestSide = Math.max(top, right, bottom, left);
+    if (shortestSide < .16 || longestSide / shortestSide > 5) return -Infinity;
+    let area = 0;
+    let centerX = 0;
+    let centerY = 0;
+    points.forEach(function (point, index) {
+      const next = points[(index + 1) % points.length];
+      area += point.x * next.y - next.x * point.y;
+      centerX += point.x;
+      centerY += point.y;
+    });
+    area = Math.abs(area) / 2;
+    if (area < .07 || area > .96) return -Infinity;
+    const distanceFromCenter = Math.hypot(centerX / 4 - .5, centerY / 4 - .5);
+    return area * (1 - Math.min(.35, distanceFromCenter * .35));
+  }
+
+  function bestRectangleFromMask(mask, canvas) {
     const contours = new cv.MatVector();
     const hierarchy = new cv.Mat();
+    let best;
+    let bestScore = -Infinity;
     try {
-      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-      cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
-      cv.Canny(blurred, edges, 60, 160);
-      cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
-      const minimumArea = canvas.width * canvas.height * .13;
-      let largest;
-      let largestArea = minimumArea;
+      cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
       for (let index = 0; index < contours.size(); index += 1) {
         const contour = contours.get(index);
-        const area = cv.contourArea(contour);
-        if (area > largestArea) {
+        const contourArea = Math.abs(cv.contourArea(contour));
+        if (contourArea >= canvas.width * canvas.height * .055) {
           const perimeter = cv.arcLength(contour, true);
           const approximation = new cv.Mat();
-          cv.approxPolyDP(contour, approximation, .02 * perimeter, true);
+          cv.approxPolyDP(contour, approximation, .018 * perimeter, true);
+          let points;
+          let score = -Infinity;
           if (approximation.rows === 4 && cv.isContourConvex(approximation)) {
-            largestArea = area;
-            largest = [];
-            for (let point = 0; point < 4; point += 1) {
-              largest.push({ x: approximation.intPtr(point, 0)[0] / canvas.width, y: approximation.intPtr(point, 0)[1] / canvas.height });
+            points = normalizedPointsFromMat(approximation, canvas, false);
+            score = rectangleScore(points) + .15;
+          } else {
+            const rotatedRect = cv.minAreaRect(contour);
+            const rotatedArea = rotatedRect.size.width * rotatedRect.size.height;
+            const rectangularity = rotatedArea ? contourArea / rotatedArea : 0;
+            if (rectangularity > .58) {
+              const box = cv.boxPoints(rotatedRect);
+              points = normalizedPointsFromMat(box, canvas, true);
+              box.delete();
+              score = rectangleScore(points) * rectangularity;
             }
           }
           approximation.delete();
+          if (score > bestScore) {
+            best = points;
+            bestScore = score;
+          }
         }
         contour.delete();
       }
-      return largest ? orderCorners(largest) : undefined;
+      return best;
     } finally {
-      src.delete(); gray.delete(); blurred.delete(); edges.delete(); contours.delete(); hierarchy.delete();
+      contours.delete();
+      hierarchy.delete();
+    }
+  }
+
+  function quadrilateralFromCanvas(canvas) {
+    const src = cv.imread(canvas);
+    const gray = new cv.Mat();
+    const normalized = new cv.Mat();
+    const blurred = new cv.Mat();
+    const edges = new cv.Mat();
+    const connectedEdges = new cv.Mat();
+    const threshold = new cv.Mat();
+    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
+    try {
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      cv.equalizeHist(gray, normalized);
+      cv.GaussianBlur(normalized, blurred, new cv.Size(5, 5), 0);
+
+      // Canny finds clear page borders. Closing bridges short gaps caused by shadows and glare.
+      cv.Canny(blurred, edges, 30, 110);
+      cv.morphologyEx(edges, connectedEdges, cv.MORPH_CLOSE, kernel);
+      cv.dilate(connectedEdges, connectedEdges, kernel);
+      let rectangle = bestRectangleFromMask(connectedEdges, canvas);
+      if (rectangle) return rectangle;
+
+      // A light page on a darker table often has no continuous Canny border.
+      cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+      cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel);
+      rectangle = bestRectangleFromMask(threshold, canvas);
+      return rectangle;
+    } finally {
+      src.delete();
+      gray.delete();
+      normalized.delete();
+      blurred.delete();
+      edges.delete();
+      connectedEdges.delete();
+      threshold.delete();
+      kernel.delete();
     }
   }
 
