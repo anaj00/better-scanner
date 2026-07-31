@@ -1,29 +1,46 @@
-# Paper Trail Scanner
+# BetterScanner
 
-Client-only mobile document scanner. It uses the phone camera, detects pages with OpenCV.js, creates black-and-white PDFs at an effective 200 DPI, and never uploads scans to a server.
+Client-only mobile document scanner using browser camera APIs, OpenCV.js, pdf-lib, and JSZip. Camera frames and documents remain in the browser; no image upload backend is used.
 
-## Use Tonight
+## Pipeline
 
-The camera requires HTTPS on a phone. From this directory, deploy it as a static Vercel site:
+1. `detector-worker.js` analyzes bounded 480px frames off the UI thread.
+2. It evaluates auto/wide Canny, adaptive threshold, and normal/inverse Otsu masks.
+3. Candidates are scored using area, rectangularity, angles, edge support, border contrast, margins, center position, and temporal similarity. Detection does not prefer Legal-shaped contours.
+4. The overlay is exponentially smoothed (`alpha = 0.38`). A changed candidate resets smoothing and readiness.
+5. Auto-capture requires six stable results, confidence of at least `0.70`, acceptable exposure/focus, and at least 900ms sustained readiness.
+6. Capture prefers `ImageCapture.takePhoto()` and falls back to the intrinsic video frame.
+7. Approximate preview corners are mapped to the still and locally refined. Every capture then opens the draggable corner editor.
+8. Perspective correction uses measured edge lengths and never stretches the crop to a paper ratio.
+9. Pages are generated as Enhanced color (default), Grayscale, Black and white, or Original. Color/grayscale use JPEG; B&W uses PNG.
+10. PDFs use US Legal page dimensions and fit the natural scan without distortion. PDFs can be shared separately or bundled into a ZIP.
+
+## Run
+
+Camera access requires HTTPS on phones. Deploy the directory as a static site:
 
 ```sh
 npx vercel --prod
 ```
 
-Open the URL on an iPhone or Android phone, grant camera access, and use the rear camera.
+## Debugging
 
-## Scan Workflow
+Open `/?debug=1` to show confidence, blur score, and winning mask in the camera status. Open `/debug.html` to test uploaded fixture images.
 
-1. Keep one page in view until it captures automatically. Use the center capture button if needed.
-2. Tap **New document** after the last page of a document.
-3. Continue scanning the next document without closing the camera.
-4. Tap **Finish scans** to generate one PDF for every document boundary.
-5. Use **Download all (.zip)** to save every PDF in one archive. Use the individual Share/Open actions when PDFs need to be saved separately.
+Recommended fixture set:
 
-PDF pages are US Legal at an effective 200 DPI. Text (B&W) is the default; grayscale and color are also available before capturing a page. Flash uses the browser torch API where the phone and browser support it; iPhone Safari may not expose that control.
+- White page on dark and light tables
+- Legal MOA, A4, Letter, and receipt
+- Strong perspective, rotated page, and partially clipped page
+- Partial shadow, low light, and glare
+- Form with many internal rectangular fields
 
-Live page detection runs in `detector-worker.js` so OpenCV contour processing does not block the camera preview. Page cropping and PDF processing still happen only when a page is captured.
+The fixture page displays the selected quadrilateral, confidence, mask, candidate count, and quality metrics. Add fixtures by keeping images locally and selecting them through the file input; images are not uploaded.
 
-## Compatibility
+## Mobile Testing
 
-Target browsers are iPhone Safari, Android Chrome, Samsung Internet, and other modern mobile browsers with `getUserMedia()` camera access. A camera-switch control and manual crop fallback are available for devices where rear-camera selection or automatic page detection is imperfect.
+On iPhone Safari and Android Chrome, test camera permission denial, rear-camera selection, manual capture, auto-capture on/off, review handle dragging, rotation, all four processing modes, retake, undo, document boundaries, PDF sharing, and ZIP saving. Also background/resume the browser during an active session.
+
+## Limitations
+
+This is a browser approximation, not Apple Notes parity. `ImageCapture`, torch, camera selection, still-photo framing, and downloadable file behavior vary by browser. Safari often uses the video-frame fallback. The review editor remains authoritative when still-photo framing differs from the preview. Large scan batches can exceed a mobile browser's memory limit; pages are bounded to a 2400px maximum dimension and generated sequentially.

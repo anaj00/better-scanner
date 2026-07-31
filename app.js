@@ -1,20 +1,24 @@
-/* global cv, PDFLib, JSZip */
+/* global cv, PDFLib, JSZip, ScannerGeometry */
 (function () {
   "use strict";
 
-  const PROCESSING_WIDTH = 360;
-  const AUTO_CAPTURE_STABLE_FRAMES = 2;
-  const DETECTION_INTERVAL = 160;
-  const PAGE_REMOVED_DELAY = 350;
+  const PROCESSING_WIDTH = 480;
+  const AUTO_CAPTURE_STABLE_FRAMES = 6;
+  const DETECTION_INTERVAL = 125;
+  const PAGE_REMOVED_DELAY = 900;
   const PAGE_CHANGE_DELAY = 450;
-  const DPI = 200;
+  const DEBUG_MODE = new URLSearchParams(location.search).get("debug") === "1";
 
   const elements = {
     appHeader: document.querySelector("#app-header"),
     welcome: document.querySelector("#welcome-screen"),
     scanner: document.querySelector("#scanner-screen"),
     results: document.querySelector("#results-screen"),
+    review: document.querySelector("#review-screen"),
     start: document.querySelector("#start-button"),
+    cameraFileButton: document.querySelector("#camera-file-button"),
+    cameraFileInput: document.querySelector("#camera-file-input"),
+    finishFiles: document.querySelector("#finish-files-button"),
     reset: document.querySelector("#reset-button"),
     scanMore: document.querySelector("#scan-more-button"),
     video: document.querySelector("#camera"),
@@ -39,7 +43,18 @@
     resultList: document.querySelector("#results-list"),
     downloadZip: document.querySelector("#download-zip-button"),
     toast: document.querySelector("#toast"),
-    secureNote: document.querySelector("#secure-context-note")
+    secureNote: document.querySelector("#secure-context-note"),
+    reviewImage: document.querySelector("#review-image"),
+    reviewCanvas: document.querySelector("#review-canvas"),
+    reviewStage: document.querySelector("#review-stage"),
+    keepScan: document.querySelector("#keep-scan-button"),
+    retake: document.querySelector("#retake-button"),
+    resetCorners: document.querySelector("#reset-corners-button"),
+    fullImage: document.querySelector("#full-image-button"),
+    rotate: document.querySelector("#rotate-button"),
+    autoCapture: document.querySelector("#auto-capture-toggle"),
+    reviewMode: document.querySelector("#review-mode-select"),
+    compare: document.querySelector("#compare-button")
   };
 
   let stream;
@@ -57,6 +72,23 @@
   let torchEnabled = false;
   let detectorBusy = false;
   let detectorRequestId = 0;
+  let pendingCapture;
+  let reviewCorners;
+  let initialReviewCorners;
+  let activeReviewCorner = -1;
+  let readySince = 0;
+  let appPhase = "welcome";
+  let detectedCorners = null;
+  let displayCorners = null;
+  let lastReliableCorners = null;
+  let lastDetectorMetrics = null;
+  let lastHandledDetectionId = 0;
+  let reviewUrl;
+  let processedReviewUrl;
+  let showingProcessedReview = false;
+  let cameraSessionId = 0;
+  let activeDetectorRequestId = 0;
+  let reviewGeneration = 0;
 
   const processCanvas = document.createElement("canvas");
   const sourceCanvas = document.createElement("canvas");
@@ -72,9 +104,11 @@
   }
 
   function setScreen(screen) {
+    appPhase = screen;
     elements.welcome.hidden = screen !== "welcome";
     elements.scanner.hidden = screen !== "scanner";
     elements.results.hidden = screen !== "results";
+    elements.review.hidden = screen !== "review";
     elements.reset.hidden = screen === "welcome";
     elements.appHeader.hidden = screen === "scanner";
     document.body.classList.toggle("scanning", screen === "scanner");
@@ -108,7 +142,38 @@
     elements.undo.disabled = pages === 0;
     elements.newDocument.disabled = current.length === 0;
     elements.finish.disabled = pages === 0;
+    elements.finishFiles.hidden = pages === 0;
     renderMenuDocuments();
+  }
+
+  function reviewPoints() {
+    return reviewCorners || [{ x: .05, y: .05 }, { x: .95, y: .05 }, { x: .95, y: .95 }, { x: .05, y: .95 }];
+  }
+
+  function containedImageRect(stageWidth, stageHeight, imageWidth, imageHeight) {
+    const scale = Math.min(stageWidth / imageWidth, stageHeight / imageHeight);
+    const width = imageWidth * scale; const height = imageHeight * scale;
+    return { left: (stageWidth - width) / 2, top: (stageHeight - height) / 2, width: width, height: height };
+  }
+
+  function drawReview() {
+    const canvas = elements.reviewCanvas;
+    const rect = elements.reviewStage.getBoundingClientRect();
+    const ratio = window.devicePixelRatio || 1;
+    canvas.width = Math.round(rect.width * ratio);
+    canvas.height = Math.round(rect.height * ratio);
+    const context = canvas.getContext("2d");
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    const imageRect = containedImageRect(rect.width, rect.height, elements.reviewImage.naturalWidth, elements.reviewImage.naturalHeight);
+    const points = reviewPoints().map(function (point) { return { x: (imageRect.left + point.x * imageRect.width) * ratio, y: (imageRect.top + point.y * imageRect.height) * ratio }; });
+    context.fillStyle = "rgba(0, 0, 0, .42)";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.globalCompositeOperation = "destination-out";
+    context.beginPath(); points.forEach(function (point, index) { index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y); }); context.closePath(); context.fill();
+    context.globalCompositeOperation = "source-over";
+    context.beginPath(); points.forEach(function (point, index) { index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y); }); context.closePath();
+    context.strokeStyle = "#d7f770"; context.lineWidth = 3 * ratio; context.stroke();
+    points.forEach(function (point) { context.beginPath(); context.arc(point.x, point.y, 12 * ratio, 0, Math.PI * 2); context.fillStyle = "#fff"; context.fill(); context.strokeStyle = "#111714"; context.stroke(); });
   }
 
   function renderMenuDocuments() {
@@ -126,6 +191,7 @@
   }
 
   function stopCamera() {
+    cameraSessionId += 1;
     clearTimeout(detectionTimer);
     detectionTimer = undefined;
     if (stream) {
@@ -135,6 +201,12 @@
     elements.video.srcObject = null;
     torchEnabled = false;
     detectorBusy = false;
+    readySince = 0;
+    detectedCorners = null;
+    displayCorners = null;
+    lastReliableCorners = null;
+    lastHandledDetectionId = 0;
+    if (detectorWorker) detectorWorker.postMessage({ type: "reset" });
     elements.flashButton.disabled = true;
     elements.flashButton.textContent = "Flash";
     closeMenu();
@@ -164,7 +236,11 @@
   }
 
   function resetSession() {
+    reviewGeneration += 1;
     stopCamera();
+    if (pendingCapture && pendingCapture.close) pendingCapture.close(); pendingCapture = undefined;
+    if (reviewUrl) URL.revokeObjectURL(reviewUrl); reviewUrl = undefined;
+    if (processedReviewUrl) URL.revokeObjectURL(processedReviewUrl); processedReviewUrl = undefined;
     documentGroups = [[]];
     generatedFiles.forEach(function (file) { URL.revokeObjectURL(file.url); });
     generatedFiles = [];
@@ -211,15 +287,18 @@
     elements.status.textContent = "Opening camera...";
     try {
       stopCamera();
+      const sessionId = cameraSessionId;
       const constraints = {
         audio: false,
         video: {
           facingMode: { ideal: cameraFacing },
-          width: { ideal: 1920 },
-          height: { ideal: 1920 }
+          width: { ideal: 3840 },
+          height: { ideal: 2160 }
         }
       };
-      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      const openedStream = await navigator.mediaDevices.getUserMedia(constraints);
+      if (sessionId !== cameraSessionId) { openedStream.getTracks().forEach(function (track) { track.stop(); }); return; }
+      stream = openedStream;
       elements.video.srcObject = stream;
       await elements.video.play();
       updateFlashControl();
@@ -342,139 +421,6 @@
     return "Legal";
   }
 
-  function orderCorners(points) {
-    const bySum = points.slice().sort(function (a, b) { return (a.x + a.y) - (b.x + b.y); });
-    const topLeft = bySum[0];
-    const bottomRight = bySum[3];
-    const remaining = points.filter(function (point) { return point !== topLeft && point !== bottomRight; });
-    const topRight = remaining[0].x > remaining[1].x ? remaining[0] : remaining[1];
-    const bottomLeft = remaining[0] === topRight ? remaining[1] : remaining[0];
-    return [topLeft, topRight, bottomRight, bottomLeft];
-  }
-
-  function normalizedPointsFromMat(mat, canvas, isFloat) {
-    const points = [];
-    for (let index = 0; index < 4; index += 1) {
-      const point = isFloat ? mat.floatPtr(index, 0) : mat.intPtr(index, 0);
-      points.push({
-        x: point[0] / canvas.width,
-        y: point[1] / canvas.height
-      });
-    }
-    return orderCorners(points);
-  }
-
-  function rectangleScore(points, canvas) {
-    const scaledDistance = function (one, two) {
-      return Math.hypot((one.x - two.x) * canvas.width, (one.y - two.y) * canvas.height);
-    };
-    const top = scaledDistance(points[0], points[1]);
-    const right = scaledDistance(points[1], points[2]);
-    const bottom = scaledDistance(points[2], points[3]);
-    const left = scaledDistance(points[3], points[0]);
-    const shortestSide = Math.min(top, right, bottom, left);
-    const longestSide = Math.max(top, right, bottom, left);
-    if (shortestSide < Math.min(canvas.width, canvas.height) * .14 || longestSide / shortestSide > 3.2) return -Infinity;
-    const pageRatio = Math.min((top + bottom) / 2, (left + right) / 2) / Math.max((top + bottom) / 2, (left + right) / 2);
-    const expectedRatio = 8.5 / 14;
-    let area = 0;
-    let centerX = 0;
-    let centerY = 0;
-    points.forEach(function (point, index) {
-      const next = points[(index + 1) % points.length];
-      area += point.x * next.y - next.x * point.y;
-      centerX += point.x;
-      centerY += point.y;
-    });
-    area = Math.abs(area) / 2;
-    if (area < .08 || area > .92) return -Infinity;
-    const distanceFromCenter = Math.hypot(centerX / 4 - .5, centerY / 4 - .5);
-    const aspectMatch = Math.max(0, 1 - Math.abs(pageRatio - expectedRatio) * 1.4);
-    return area * aspectMatch * (1 - Math.min(.35, distanceFromCenter * .35));
-  }
-
-  function bestRectangleFromMask(mask, canvas, retrievalMode, minimumCoverage) {
-    const contours = new cv.MatVector();
-    const hierarchy = new cv.Mat();
-    let best;
-    let bestScore = -Infinity;
-    try {
-      cv.findContours(mask, contours, hierarchy, retrievalMode, cv.CHAIN_APPROX_SIMPLE);
-      for (let index = 0; index < contours.size(); index += 1) {
-        const contour = contours.get(index);
-        const contourArea = Math.abs(cv.contourArea(contour));
-        if (contourArea >= canvas.width * canvas.height * minimumCoverage) {
-          const perimeter = cv.arcLength(contour, true);
-          const approximation = new cv.Mat();
-          cv.approxPolyDP(contour, approximation, .018 * perimeter, true);
-          let points;
-          let score = -Infinity;
-          if (approximation.rows === 4 && cv.isContourConvex(approximation)) {
-            points = normalizedPointsFromMat(approximation, canvas, false);
-            score = rectangleScore(points, canvas) + .15;
-          } else {
-            const rotatedRect = cv.minAreaRect(contour);
-            const rotatedArea = rotatedRect.size.width * rotatedRect.size.height;
-            const rectangularity = rotatedArea ? contourArea / rotatedArea : 0;
-            // A page with one weak edge can still produce a 3-6 side outer contour.
-            // Inner boxes are rejected by the page-size and Legal-aspect checks above.
-            if (approximation.rows >= 3 && approximation.rows <= 6 && rectangularity > .32) {
-              const box = cv.boxPoints(rotatedRect);
-              points = normalizedPointsFromMat(box, canvas, true);
-              box.delete();
-              score = rectangleScore(points, canvas) * rectangularity;
-            }
-          }
-          approximation.delete();
-          if (score > bestScore) {
-            best = points;
-            bestScore = score;
-          }
-        }
-        contour.delete();
-      }
-      return best;
-    } finally {
-      contours.delete();
-      hierarchy.delete();
-    }
-  }
-
-  function quadrilateralFromCanvas(canvas) {
-    const src = cv.imread(canvas);
-    const gray = new cv.Mat();
-    const blurred = new cv.Mat();
-    const edges = new cv.Mat();
-    const connectedEdges = new cv.Mat();
-    const threshold = new cv.Mat();
-    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
-    try {
-      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-      cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
-
-      // Canny finds clear outer borders. Closing bridges small gaps without merging form fields.
-      cv.Canny(blurred, edges, 20, 90);
-      cv.morphologyEx(edges, connectedEdges, cv.MORPH_CLOSE, kernel);
-      let rectangle = bestRectangleFromMask(connectedEdges, canvas, cv.RETR_EXTERNAL, .1);
-      if (rectangle) return rectangle;
-
-      // A light page on a darker table often has no continuous Canny border.
-      cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
-      cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel);
-      rectangle = bestRectangleFromMask(threshold, canvas, cv.RETR_EXTERNAL, .1);
-      if (rectangle) return rectangle;
-      return undefined;
-    } finally {
-      src.delete();
-      gray.delete();
-      blurred.delete();
-      edges.delete();
-      connectedEdges.delete();
-      threshold.delete();
-      kernel.delete();
-    }
-  }
-
   function averageCornerMovement(frames) {
     if (frames.length < 2) return Infinity;
     let movement = 0;
@@ -489,7 +435,7 @@
   }
 
   function processFrame() {
-    if (!stream || elements.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || isCapturing || detectorBusy) return;
+    if (appPhase !== "scanner" || !stream || elements.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || isCapturing || detectorBusy) return;
     const videoWidth = elements.video.videoWidth;
     const videoHeight = elements.video.videoHeight;
     if (!videoWidth || !videoHeight) return;
@@ -510,16 +456,25 @@
     const frameId = detectorRequestId += 1;
     // ImageData works in Safari workers without relying on OffscreenCanvas support.
     const imageData = processContext.getImageData(0, 0, processCanvas.width, processCanvas.height);
-    detectorWorker.postMessage({ id: frameId, width: processCanvas.width, height: processCanvas.height, imageData: imageData });
+    activeDetectorRequestId = frameId;
+    detectorWorker.postMessage({ type: "detect", id: frameId, sessionId: cameraSessionId, width: processCanvas.width, height: processCanvas.height, sentAt: performance.now(), buffer: imageData.data.buffer }, [imageData.data.buffer]);
   }
 
-  function handleDetection(corners) {
+  function handleDetection(result) {
+    if (appPhase !== "scanner") { detectorBusy = false; return; }
+    if (result.id !== activeDetectorRequestId || result.sessionId !== cameraSessionId || result.id <= lastHandledDetectionId) return;
     detectorBusy = false;
-    currentCorners = corners;
+    lastHandledDetectionId = result.id;
+    const corners = result.corners;
+    const confidence = result.confidence || 0;
+    lastDetectorMetrics = result.metrics;
+    detectedCorners = corners;
     if (!corners) {
-      currentCorners = pageGuideCorners();
-      drawOutline(currentCorners, false, true);
+      currentCorners = null;
+      displayCorners = null;
+      drawOutline(pageGuideCorners(), false, true);
       stableCorners = [];
+      readySince = 0;
       if (requiresPageChange && Date.now() - lastPageSeenAt > PAGE_REMOVED_DELAY) {
         requiresPageChange = false;
         elements.status.textContent = "Ready for the next page.";
@@ -528,17 +483,33 @@
       }
       return;
     }
+    const identityChanged = !displayCorners || Math.hypot(corners.reduce(function (sum, point) { return sum + point.x / 4; }, 0) - displayCorners.reduce(function (sum, point) { return sum + point.x / 4; }, 0), corners.reduce(function (sum, point) { return sum + point.y / 4; }, 0) - displayCorners.reduce(function (sum, point) { return sum + point.y / 4; }, 0)) > .12;
+    if (identityChanged) { displayCorners = corners.map(function (point) { return { x: point.x, y: point.y }; }); stableCorners = []; readySince = 0; }
+    else displayCorners = corners.map(function (point, index) { return { x: .38 * point.x + .62 * displayCorners[index].x, y: .38 * point.y + .62 * displayCorners[index].y }; });
+    currentCorners = corners;
+    if (confidence >= .62) lastReliableCorners = corners.map(function (point) { return { x: point.x, y: point.y }; });
     lastPageSeenAt = Date.now();
-    stableCorners.push(corners);
+    stableCorners.push(displayCorners);
     if (stableCorners.length > AUTO_CAPTURE_STABLE_FRAMES) stableCorners.shift();
-    const stable = stableCorners.length === AUTO_CAPTURE_STABLE_FRAMES && averageCornerMovement(stableCorners) < .005;
-    drawOutline(corners, stable && !requiresPageChange);
+    const areas = stableCorners.map(function (points) { return Math.abs(ScannerGeometry.signedArea(points)); });
+    const areaStable = areas.length && Math.max.apply(null, areas) - Math.min.apply(null, areas) < .025;
+    const stable = stableCorners.length >= AUTO_CAPTURE_STABLE_FRAMES && averageCornerMovement(stableCorners) < .005 && areaStable;
+    const qualityReady = lastDetectorMetrics && lastDetectorMetrics.areaRatio >= .16 && lastDetectorMetrics.borderMargin >= .008 && lastDetectorMetrics.blurScore >= 45 && lastDetectorMetrics.brightness >= 45 && lastDetectorMetrics.brightness <= 242 && lastDetectorMetrics.overexposure <= .28 && lastDetectorMetrics.underexposure <= .12 && lastDetectorMetrics.glareRatio <= .08;
+    if (stable && confidence >= .7 && qualityReady && !requiresPageChange) {
+      if (!readySince) readySince = Date.now();
+    } else {
+      readySince = 0;
+    }
+    drawOutline(displayCorners, stable && !requiresPageChange);
     if (requiresPageChange) {
       elements.status.textContent = "Move the page away, then show the next one.";
       return;
     }
-    elements.status.textContent = stable ? "Page ready. Capturing..." : "Hold steady to scan automatically...";
-    if (stable) capturePage(corners);
+    const ready = readySince && Date.now() - readySince >= 900;
+    let guidance = confidence < .48 ? "Finding page..." : (lastDetectorMetrics && lastDetectorMetrics.areaRatio < .16 ? "Move closer" : (!lastDetectorMetrics || lastDetectorMetrics.blurScore < 45 ? "Hold steady" : (lastDetectorMetrics.brightness < 45 ? "Too dark" : (lastDetectorMetrics.overexposure > .28 || lastDetectorMetrics.glareRatio > .08 ? "Reduce glare" : "Hold steady"))));
+    elements.status.textContent = ready ? "Ready. Capturing..." : guidance;
+    if (DEBUG_MODE) elements.status.textContent += " | confidence " + confidence.toFixed(2) + " | blur " + Math.round(lastDetectorMetrics.blurScore) + " | mask " + (result.diagnostics && result.diagnostics.maskUsed);
+    if (ready && elements.autoCapture.checked) { readySince = 0; captureCurrentPage(lastReliableCorners || corners); }
   }
 
   function distance(one, two) {
@@ -547,83 +518,185 @@
 
   function outputDimensions(corners, sourceWidth, sourceHeight) {
     const points = corners.map(function (point) { return { x: point.x * sourceWidth, y: point.y * sourceHeight }; });
-    const top = distance(points[0], points[1]);
-    const bottom = distance(points[3], points[2]);
-    const left = distance(points[0], points[3]);
-    const right = distance(points[1], points[2]);
-    const ratio = Math.min(top, bottom) / Math.max(left, right);
-    const portraitRatio = ratio > 1 ? 1 / ratio : ratio;
-    const selected = elements.pageSize.value;
-    let paper = selected;
-    if (selected === "auto") {
-      const a4Difference = Math.abs(portraitRatio - (210 / 297));
-      const letterDifference = Math.abs(portraitRatio - (8.5 / 11));
-      paper = Math.min(a4Difference, letterDifference) < .055 ? (a4Difference < letterDifference ? "a4" : "letter") : "custom";
+    const width = Math.max(distance(points[0], points[1]), distance(points[3], points[2]));
+    const height = Math.max(distance(points[0], points[3]), distance(points[1], points[2]));
+    const memory = navigator.deviceMemory || 4; const maximumDimension = memory <= 2 ? 2000 : (memory <= 4 ? 2800 : 3200);
+    const maximumPixels = memory <= 2 ? 4000000 : 8000000;
+    const scale = Math.min(1, maximumDimension / Math.max(width, height), Math.sqrt(maximumPixels / (width * height)));
+    return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+  }
+
+  function canvasToBlob(canvas, type, quality) {
+    return new Promise(function (resolve, reject) { canvas.toBlob(function (blob) { blob ? resolve(blob) : reject(new Error("Image encoding failed")); }, type, quality); });
+  }
+
+  async function captureHighResolutionStill() {
+    const track = stream && stream.getVideoTracks()[0];
+    if (window.ImageCapture && track) {
+      try {
+        const photo = await new ImageCapture(track).takePhoto();
+        return await decodeBlobToSource(photo);
+      } catch (error) { /* Use the intrinsic video fallback below. */ }
     }
-    let width;
-    let height;
-    if (paper === "a4") { width = 1654; height = 2339; }
-    else if (paper === "legal") { width = 1700; height = 2800; }
-    else if (paper === "letter") { width = 1700; height = 2200; }
-    else {
-      if (ratio > 1) {
-        width = 2200;
-        height = Math.round(Math.max(600, width / ratio));
-      } else {
-        height = 2200;
-        width = Math.round(Math.max(600, height * ratio));
+    const canvas = document.createElement("canvas");
+    canvas.width = elements.video.videoWidth;
+    canvas.height = elements.video.videoHeight;
+    canvas.getContext("2d").drawImage(elements.video, 0, 0, canvas.width, canvas.height);
+    return typeof createImageBitmap === "function" ? createImageBitmap(canvas) : canvas;
+  }
+
+  async function decodeBlobToSource(blob) {
+    if (typeof createImageBitmap === "function") {
+      try { return await createImageBitmap(blob, { imageOrientation: "from-image" }); }
+      catch (error) { /* Use the HTML image decoder below. */ }
+    }
+    const image = new Image(); const url = URL.createObjectURL(blob); image.src = url;
+    try {
+      if (image.decode) await image.decode(); else await new Promise(function (resolve, reject) { image.onload = resolve; image.onerror = reject; });
+      const canvas = document.createElement("canvas"); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight; canvas.getContext("2d").drawImage(image, 0, 0); return canvas;
+    } finally { URL.revokeObjectURL(url); }
+  }
+
+  async function captureCurrentPage(corners) {
+    if (isCapturing) return;
+    isCapturing = true;
+    elements.status.textContent = "Capturing high-resolution still...";
+    const generation = reviewGeneration += 1;
+    try {
+      const bitmap = await captureHighResolutionStill();
+      if (generation !== reviewGeneration) { if (bitmap.close) bitmap.close(); return; }
+      pendingCapture = bitmap;
+      const mappedCorners = corners ? mapPreviewCornersToStill(corners, elements.video.videoWidth, elements.video.videoHeight, bitmap.width, bitmap.height) : null;
+      reviewCorners = mappedCorners ? refineCornersOnStill(bitmap, mappedCorners) : [{ x: .05, y: .05 }, { x: .95, y: .05 }, { x: .95, y: .95 }, { x: .05, y: .95 }];
+      initialReviewCorners = reviewCorners.map(function (point) { return { x: point.x, y: point.y }; });
+      elements.reviewMode.value = elements.scanMode.value;
+      if (reviewUrl) URL.revokeObjectURL(reviewUrl);
+      reviewUrl = URL.createObjectURL(await bitmapToBlob(bitmap));
+      elements.reviewImage.src = reviewUrl;
+      if (elements.reviewImage.decode) await elements.reviewImage.decode();
+      else await new Promise(function (resolve, reject) { elements.reviewImage.onload = resolve; elements.reviewImage.onerror = reject; });
+      setScreen("review");
+      drawReview();
+    } catch (error) {
+      showToast("Could not capture the high-resolution image. Try again.");
+    } finally { isCapturing = false; }
+  }
+
+  function mapPreviewCornersToStill(corners, previewWidth, previewHeight, stillWidth, stillHeight) {
+    const previewRatio = previewWidth / previewHeight; const stillRatio = stillWidth / stillHeight;
+    return corners.map(function (point) {
+      if (previewRatio > stillRatio) {
+        const visibleHeight = stillRatio / previewRatio;
+        return { x: point.x, y: (1 - visibleHeight) / 2 + point.y * visibleHeight };
       }
-      return { width: width, height: height };
-    }
-    if (ratio > 1) return { width: height, height: width };
-    return { width: width, height: height };
+      if (previewRatio < stillRatio) {
+        const visibleWidth = previewRatio / stillRatio;
+        return { x: (1 - visibleWidth) / 2 + point.x * visibleWidth, y: point.y };
+      }
+      return { x: point.x, y: point.y };
+    });
   }
 
-  function canvasToBlob(canvas) {
-    return new Promise(function (resolve) { canvas.toBlob(resolve, "image/png"); });
+  function refineCornersOnStill(bitmap, initial) {
+    const canvas = document.createElement("canvas"); const scale = Math.min(1, 1200 / Math.max(bitmap.width, bitmap.height));
+    canvas.width = Math.round(bitmap.width * scale); canvas.height = Math.round(bitmap.height * scale); const context = canvas.getContext("2d", { willReadFrequently: true }); context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data; const gray = new Uint8Array(canvas.width * canvas.height);
+    for (let index = 0; index < gray.length; index += 1) gray[index] = Math.round(.299 * pixels[index * 4] + .587 * pixels[index * 4 + 1] + .114 * pixels[index * 4 + 2]);
+    let originalSupport = 0; let refinedSupport = 0;
+    const lines = initial.map(function (point, side) {
+      const next = initial[(side + 1) % 4]; const ax = point.x * canvas.width; const ay = point.y * canvas.height; const bx = next.x * canvas.width; const by = next.y * canvas.height;
+      const dx = bx - ax; const dy = by - ay; const length = Math.hypot(dx, dy); const nx = -dy / length; const ny = dx / length; const samples = [];
+      for (let step = 2; step <= 18; step += 1) {
+        const t = step / 20; const x = ax + dx * t; const y = ay + dy * t; let bestOffset = 0; let bestGradient = 0;
+        for (let offset = -18; offset <= 18; offset += 2) {
+          const x1 = Math.max(0, Math.min(canvas.width - 1, Math.round(x + nx * (offset - 2)))); const y1 = Math.max(0, Math.min(canvas.height - 1, Math.round(y + ny * (offset - 2))));
+          const x2 = Math.max(0, Math.min(canvas.width - 1, Math.round(x + nx * (offset + 2)))); const y2 = Math.max(0, Math.min(canvas.height - 1, Math.round(y + ny * (offset + 2)))); const gradient = Math.abs(gray[y2 * canvas.width + x2] - gray[y1 * canvas.width + x1]);
+          if (gradient > bestGradient) { bestGradient = gradient; bestOffset = offset; }
+          if (offset === 0) originalSupport += gradient;
+        }
+        refinedSupport += bestGradient;
+        samples.push({ x: x + nx * bestOffset, y: y + ny * bestOffset });
+      }
+      const center = samples.reduce(function (sum, sample) { return { x: sum.x + sample.x / samples.length, y: sum.y + sample.y / samples.length }; }, { x: 0, y: 0 });
+      let xx = 0; let xy = 0; let yy = 0; samples.forEach(function (sample) { const x = sample.x - center.x; const y = sample.y - center.y; xx += x * x; xy += x * y; yy += y * y; });
+      const angle = .5 * Math.atan2(2 * xy, xx - yy); const normal = { x: -Math.sin(angle), y: Math.cos(angle) }; return { a: normal.x, b: normal.y, c: -(normal.x * center.x + normal.y * center.y) };
+    });
+    function intersect(one, two) { const determinant = one.a * two.b - two.a * one.b; if (Math.abs(determinant) < .0001) return null; return { x: (one.b * two.c - two.b * one.c) / determinant / canvas.width, y: (one.c * two.a - two.c * one.a) / determinant / canvas.height }; }
+    const refined = ScannerGeometry.orderCorners([intersect(lines[3], lines[0]), intersect(lines[0], lines[1]), intersect(lines[1], lines[2]), intersect(lines[2], lines[3])].filter(Boolean));
+    if (!refined) return initial;
+    const movement = refined.reduce(function (sum, point, index) { return sum + distance(point, initial[index]); }, 0) / 4;
+    return movement <= .08 && refinedSupport > originalSupport * 1.08 ? refined : initial;
   }
 
-  async function capturePage(corners) {
+  function bitmapToBlob(bitmap) {
+    const canvas = document.createElement("canvas"); canvas.width = bitmap.width; canvas.height = bitmap.height;
+    canvas.getContext("2d").drawImage(bitmap, 0, 0);
+    return canvasToBlob(canvas, "image/jpeg", .95);
+  }
+
+  function processOriginal(warped, mats) { const output = warped.clone(); mats.push(output); return output; }
+
+  function applyLocalContrast(source, destination, clipLimit) {
+    let clahe;
+    try { clahe = cv.createCLAHE(clipLimit, new cv.Size(8, 8)); clahe.apply(source, destination); }
+    catch (error) { cv.equalizeHist(source, destination); }
+    finally { if (clahe) clahe.delete(); }
+  }
+
+  function processEnhancedColor(warped, mats) {
+    const rgb = new cv.Mat(); const lab = new cv.Mat(); const outputRgb = new cv.Mat(); const output = new cv.Mat(); const channels = new cv.MatVector();
+    mats.push(rgb, lab, outputRgb, output, channels);
+    cv.cvtColor(warped, rgb, cv.COLOR_RGBA2RGB); cv.cvtColor(rgb, lab, cv.COLOR_RGB2Lab); cv.split(lab, channels);
+    const luminance = channels.get(0); const background = new cv.Mat(); const normalized = new cv.Mat(); const enhancedL = new cv.Mat(); mats.push(luminance, background, normalized, enhancedL);
+    cv.GaussianBlur(luminance, background, new cv.Size(0, 0), Math.max(12, Math.round(Math.max(warped.rows, warped.cols) / 45)));
+    cv.divide(luminance, background, normalized, 210);
+    applyLocalContrast(normalized, enhancedL, 1.6);
+    const channelA = channels.get(1); const channelB = channels.get(2); const merged = new cv.MatVector(); mats.push(channelA, channelB, merged); merged.push_back(enhancedL); merged.push_back(channelA); merged.push_back(channelB);
+    cv.merge(merged, lab); cv.cvtColor(lab, outputRgb, cv.COLOR_Lab2RGB); cv.cvtColor(outputRgb, output, cv.COLOR_RGB2RGBA);
+    return output;
+  }
+
+  function processGrayscale(warped, mats) {
+    const gray = new cv.Mat(); const background = new cv.Mat(); const normalized = new cv.Mat(); const output = new cv.Mat(); mats.push(gray, background, normalized, output);
+    cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); cv.GaussianBlur(gray, background, new cv.Size(0, 0), Math.max(12, Math.round(Math.max(warped.rows, warped.cols) / 45))); cv.divide(gray, background, normalized, 215);
+    applyLocalContrast(normalized, output, 1.5); return output;
+  }
+
+  function processBlackAndWhite(warped, mats) {
+    const gray = new cv.Mat(); const background = new cv.Mat(); const normalized = new cv.Mat(); const blurred = new cv.Mat(); const output = new cv.Mat(); mats.push(gray, background, normalized, blurred, output);
+    cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); cv.GaussianBlur(gray, background, new cv.Size(0, 0), Math.max(12, Math.round(Math.max(warped.rows, warped.cols) / 45))); cv.divide(gray, background, normalized, 220); cv.GaussianBlur(normalized, blurred, new cv.Size(3, 3), 0);
+    let blockSize = Math.round(Math.min(warped.rows, warped.cols) / 30) | 1; blockSize = Math.max(31, Math.min(81, blockSize));
+    cv.adaptiveThreshold(blurred, output, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, blockSize, 10); return output;
+  }
+
+  async function capturePage(corners, bitmap) {
     if (isCapturing) return;
     isCapturing = true;
     elements.status.textContent = "Processing page...";
+    const mats = [];
+    let success = false;
     try {
-      const videoWidth = elements.video.videoWidth;
-      const videoHeight = elements.video.videoHeight;
+      const videoWidth = bitmap ? bitmap.width : elements.video.videoWidth;
+      const videoHeight = bitmap ? bitmap.height : elements.video.videoHeight;
       sourceCanvas.width = videoWidth;
       sourceCanvas.height = videoHeight;
-      sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(elements.video, 0, 0, videoWidth, videoHeight);
+      sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(bitmap || elements.video, 0, 0, videoWidth, videoHeight);
       const dimensions = outputDimensions(corners, videoWidth, videoHeight);
-      const source = cv.imread(sourceCanvas);
-      const warped = new cv.Mat();
-      const gray = new cv.Mat();
-      const background = new cv.Mat();
-      const normalized = new cv.Mat();
-      const denoised = new cv.Mat();
-      const blackAndWhite = new cv.Mat();
-      const cleaned = new cv.Mat();
+      if (Math.min(dimensions.width, dimensions.height) < 320) throw new Error("The selected crop is too small");
+      const source = cv.imread(sourceCanvas); const warped = new cv.Mat(); mats.push(source, warped);
       const sourcePoints = [];
       corners.forEach(function (point) { sourcePoints.push(point.x * videoWidth, point.y * videoHeight); });
-      const sourceMat = cv.matFromArray(4, 1, cv.CV_32FC2, sourcePoints);
-      const destinationMat = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, dimensions.width - 1, 0, dimensions.width - 1, dimensions.height - 1, 0, dimensions.height - 1]);
-      const transform = cv.getPerspectiveTransform(sourceMat, destinationMat);
+      const sourceMat = cv.matFromArray(4, 1, cv.CV_32FC2, sourcePoints); const destinationMat = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, dimensions.width - 1, 0, dimensions.width - 1, dimensions.height - 1, 0, dimensions.height - 1]); const transform = cv.getPerspectiveTransform(sourceMat, destinationMat); mats.push(sourceMat, destinationMat, transform);
       cv.warpPerspective(source, warped, transform, new cv.Size(dimensions.width, dimensions.height), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
-      cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY);
-      if (elements.scanMode.value === "black-and-white") {
-        cv.GaussianBlur(gray, background, new cv.Size(0, 0), 25);
-        cv.divide(gray, background, normalized, 255);
-        cv.GaussianBlur(normalized, denoised, new cv.Size(3, 3), 0);
-        cv.threshold(denoised, blackAndWhite, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
-        cv.medianBlur(blackAndWhite, cleaned, 3);
-      }
+      const mode = elements.scanMode.value;
+      const output = mode === "original" ? processOriginal(warped, mats) : (mode === "enhanced-color" ? processEnhancedColor(warped, mats) : (mode === "grayscale" ? processGrayscale(warped, mats) : processBlackAndWhite(warped, mats)));
       outputCanvas.width = dimensions.width;
       outputCanvas.height = dimensions.height;
-      const output = elements.scanMode.value === "color" ? warped : (elements.scanMode.value === "grayscale" ? gray : cleaned);
       cv.imshow(outputCanvas, output);
-      const blob = await canvasToBlob(outputCanvas);
-      source.delete(); warped.delete(); gray.delete(); background.delete(); normalized.delete(); denoised.delete(); blackAndWhite.delete(); cleaned.delete(); sourceMat.delete(); destinationMat.delete(); transform.delete();
-      if (!blob) throw new Error("Image conversion failed");
-      currentGroup().push({ blob: blob, width: dimensions.width, height: dimensions.height, mode: elements.scanMode.value });
+      const mimeType = mode === "black-and-white" ? "image/png" : "image/jpeg";
+      const blob = await canvasToBlob(outputCanvas, mimeType, .9);
+      const effectiveDpi = Math.min(dimensions.width / (dimensions.width > dimensions.height ? 14 : 8.5), dimensions.height / (dimensions.width > dimensions.height ? 8.5 : 14));
+      currentGroup().push({ blob: blob, mimeType: mimeType, width: dimensions.width, height: dimensions.height, mode: mode, effectiveDpi: effectiveDpi });
       requiresPageChange = true;
       lastPageSeenAt = Date.now();
       stableCorners = [];
@@ -632,6 +705,7 @@
       elements.flash.classList.add("active");
       updateControls();
       showToast("Page added to Document " + documentGroups.length + ".");
+      success = true;
       setTimeout(function () {
         if (requiresPageChange) elements.status.textContent = "Move the page away, then show the next one.";
       }, PAGE_CHANGE_DELAY);
@@ -639,14 +713,117 @@
       showToast("Could not process this page. Try the capture button again.");
       elements.status.textContent = "Ready to try again.";
     } finally {
+      mats.reverse().forEach(function (mat) { if (mat) mat.delete(); });
+      if (success && bitmap && bitmap.close) bitmap.close();
+      sourceCanvas.width = 1; sourceCanvas.height = 1; outputCanvas.width = 1; outputCanvas.height = 1;
       isCapturing = false;
     }
+    return success;
+  }
+
+  function reviewPointFromEvent(event) {
+    const rect = elements.reviewStage.getBoundingClientRect();
+    const imageRect = containedImageRect(rect.width, rect.height, elements.reviewImage.naturalWidth, elements.reviewImage.naturalHeight);
+    return { x: Math.max(0, Math.min(1, (event.clientX - rect.left - imageRect.left) / imageRect.width)), y: Math.max(0, Math.min(1, (event.clientY - rect.top - imageRect.top) / imageRect.height)) };
+  }
+
+  function beginCornerDrag(event) {
+    const point = reviewPointFromEvent(event);
+    const nearest = reviewPoints().map(function (corner) { return Math.hypot(corner.x - point.x, corner.y - point.y); });
+    const index = nearest.indexOf(Math.min.apply(null, nearest));
+    if (nearest[index] < .12) { activeReviewCorner = index; elements.reviewCanvas.setPointerCapture(event.pointerId); }
+  }
+
+  function moveCorner(event) {
+    if (activeReviewCorner < 0) return;
+    const candidate = reviewCorners.map(function (point) { return { x: point.x, y: point.y }; });
+    candidate[activeReviewCorner] = reviewPointFromEvent(event);
+    if (ScannerGeometry.validateQuad(candidate)) reviewCorners = candidate;
+    drawReview();
+  }
+
+  function endCornerDrag() { activeReviewCorner = -1; }
+
+  async function keepReview() {
+    if (!pendingCapture) return;
+    reviewGeneration += 1;
+    const bitmap = pendingCapture;
+    elements.scanMode.value = elements.reviewMode.value;
+    pendingCapture = undefined;
+    const kept = await capturePage(reviewPoints(), bitmap);
+    if (!kept) { pendingCapture = bitmap; return; }
+    elements.reviewImage.removeAttribute("src");
+    if (reviewUrl) URL.revokeObjectURL(reviewUrl); reviewUrl = undefined;
+    if (processedReviewUrl) URL.revokeObjectURL(processedReviewUrl); processedReviewUrl = undefined; showingProcessedReview = false; elements.reviewCanvas.hidden = false;
+    setScreen(stream ? "scanner" : "welcome");
+    stableCorners = []; readySince = 0; requiresPageChange = true;
+  }
+
+  function retakeReview() {
+    reviewGeneration += 1;
+    if (pendingCapture && pendingCapture.close) pendingCapture.close();
+    pendingCapture = undefined;
+    elements.reviewImage.removeAttribute("src");
+    if (reviewUrl) URL.revokeObjectURL(reviewUrl); reviewUrl = undefined;
+    if (processedReviewUrl) URL.revokeObjectURL(processedReviewUrl); processedReviewUrl = undefined; showingProcessedReview = false; elements.reviewCanvas.hidden = false;
+    setScreen(stream ? "scanner" : "welcome");
+    stableCorners = []; readySince = 0;
+  }
+
+  function showOriginalReview() { elements.reviewImage.src = reviewUrl; elements.reviewCanvas.hidden = false; elements.compare.textContent = "Preview processed"; showingProcessedReview = false; }
+  function resetReviewCorners() { showOriginalReview(); reviewCorners = initialReviewCorners.map(function (point) { return { x: point.x, y: point.y }; }); drawReview(); }
+  function useFullImage() { showOriginalReview(); reviewCorners = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }]; drawReview(); }
+
+  async function toggleProcessedReview() {
+    if (!pendingCapture) return;
+    if (showingProcessedReview) {
+      showOriginalReview(); drawReview(); return;
+    }
+    const generation = reviewGeneration; const mats = []; const previewSource = document.createElement("canvas"); const previewOutput = document.createElement("canvas");
+    try {
+      const sourceScale = Math.min(1, 1400 / Math.max(pendingCapture.width, pendingCapture.height)); previewSource.width = Math.round(pendingCapture.width * sourceScale); previewSource.height = Math.round(pendingCapture.height * sourceScale); previewSource.getContext("2d").drawImage(pendingCapture, 0, 0, previewSource.width, previewSource.height);
+      const dimensions = outputDimensions(reviewPoints(), previewSource.width, previewSource.height); const source = cv.imread(previewSource); const warped = new cv.Mat(); mats.push(source, warped);
+      const sourcePoints = []; reviewPoints().forEach(function (point) { sourcePoints.push(point.x * previewSource.width, point.y * previewSource.height); });
+      const sourceMat = cv.matFromArray(4, 1, cv.CV_32FC2, sourcePoints); const destinationMat = cv.matFromArray(4, 1, cv.CV_32FC2, [0,0,dimensions.width-1,0,dimensions.width-1,dimensions.height-1,0,dimensions.height-1]); const transform = cv.getPerspectiveTransform(sourceMat, destinationMat); mats.push(sourceMat, destinationMat, transform);
+      cv.warpPerspective(source, warped, transform, new cv.Size(dimensions.width, dimensions.height), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
+      const mode = elements.reviewMode.value; const output = mode === "original" ? processOriginal(warped, mats) : mode === "enhanced-color" ? processEnhancedColor(warped, mats) : mode === "grayscale" ? processGrayscale(warped, mats) : processBlackAndWhite(warped, mats);
+      previewOutput.width = dimensions.width; previewOutput.height = dimensions.height; cv.imshow(previewOutput, output);
+      const blob = await canvasToBlob(previewOutput, mode === "black-and-white" ? "image/png" : "image/jpeg", .88);
+      if (generation !== reviewGeneration) return;
+      if (processedReviewUrl) URL.revokeObjectURL(processedReviewUrl); processedReviewUrl = URL.createObjectURL(blob); elements.reviewImage.src = processedReviewUrl; elements.reviewCanvas.hidden = true; elements.compare.textContent = "View original"; showingProcessedReview = true;
+    } catch (error) { showToast("Could not build the processed preview."); }
+    finally { mats.reverse().forEach(function (mat) { if (mat) mat.delete(); }); }
+  }
+
+  async function rotateReview() {
+    if (!pendingCapture) return;
+    reviewGeneration += 1;
+    const canvas = document.createElement("canvas"); canvas.width = pendingCapture.height; canvas.height = pendingCapture.width;
+    const context = canvas.getContext("2d"); context.translate(canvas.width, 0); context.rotate(Math.PI / 2); context.drawImage(pendingCapture, 0, 0);
+    if (pendingCapture.close) pendingCapture.close();
+    pendingCapture = typeof createImageBitmap === "function" ? await createImageBitmap(canvas) : canvas;
+    reviewCorners = ScannerGeometry.orderCorners(reviewPoints().map(function (point) { return { x: 1 - point.y, y: point.x }; }));
+    initialReviewCorners = ScannerGeometry.orderCorners(initialReviewCorners.map(function (point) { return { x: 1 - point.y, y: point.x }; }));
+    if (reviewUrl) URL.revokeObjectURL(reviewUrl); reviewUrl = URL.createObjectURL(await bitmapToBlob(pendingCapture)); elements.reviewImage.src = reviewUrl;
+    if (elements.reviewImage.decode) await elements.reviewImage.decode();
+    showOriginalReview();
+    drawReview();
   }
 
   function manualCapture() {
-    const fallbackCorners = pageGuideCorners();
-    if (!currentCorners) showToast("Using the " + guideLabel() + " guide. Keep the page inside its dashed border.");
-    capturePage(currentCorners || fallbackCorners);
+    captureCurrentPage(currentCorners);
+  }
+
+  async function openCameraFile(file) {
+    if (!file) return;
+    try {
+      pendingCapture = await decodeBlobToSource(file);
+      reviewCorners = [{ x: .05, y: .05 }, { x: .95, y: .05 }, { x: .95, y: .95 }, { x: .05, y: .95 }];
+      initialReviewCorners = reviewCorners.map(function (point) { return { x: point.x, y: point.y }; });
+      if (reviewUrl) URL.revokeObjectURL(reviewUrl); reviewUrl = URL.createObjectURL(file); elements.reviewImage.src = reviewUrl;
+      if (elements.reviewImage.decode) await elements.reviewImage.decode();
+      setScreen("review"); drawReview();
+    } catch (error) { showToast("Could not open that camera image."); }
   }
 
   function undoPage() {
@@ -684,13 +861,13 @@
       for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
         const pdf = await PDFLib.PDFDocument.create();
         for (const scan of groups[groupIndex]) {
-          const image = await pdf.embedPng(await scan.blob.arrayBuffer());
-          const width = scan.width / DPI * 72;
-          const height = scan.height / DPI * 72;
-          const page = pdf.addPage([width, height]);
-          page.drawImage(image, { x: 0, y: 0, width: width, height: height });
+          const bytes = await scan.blob.arrayBuffer();
+          const image = scan.mimeType === "image/png" ? await pdf.embedPng(bytes) : await pdf.embedJpg(bytes);
+          const landscape = scan.width > scan.height; const pageWidth = landscape ? 1008 : 612; const pageHeight = landscape ? 612 : 1008;
+          const page = pdf.addPage([pageWidth, pageHeight]); const scale = Math.min(pageWidth / image.width, pageHeight / image.height); const width = image.width * scale; const height = image.height * scale;
+          page.drawImage(image, { x: (pageWidth - width) / 2, y: (pageHeight - height) / 2, width: width, height: height });
         }
-        const bytes = await pdf.save();
+        const bytes = await pdf.save({ useObjectStreams: true });
         const fileName = "scan-document-" + String(groupIndex + 1).padStart(2, "0") + ".pdf";
         const blob = new Blob([bytes], { type: "application/pdf" });
         generatedFiles.push({
@@ -724,7 +901,7 @@
       const note = document.createElement("p");
       const modes = new Set(file.modes);
       const mode = modes.size === 1 ? Array.from(modes)[0].replaceAll("-", " ") : "mixed modes";
-      note.textContent = file.pages + " " + (file.pages === 1 ? "page" : "pages") + " - " + mode + " - 200 DPI";
+      note.textContent = file.pages + " " + (file.pages === 1 ? "page" : "pages") + " - " + mode;
       details.append(title, note);
       const actions = document.createElement("div");
       actions.className = "result-actions";
@@ -768,7 +945,7 @@
     try {
       const zip = new JSZip();
       generatedFiles.forEach(function (file) { zip.file(file.name, file.blob); });
-      const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
+      const blob = await zip.generateAsync({ type: "blob", compression: "STORE" });
       const name = "scanned-documents.zip";
       const file = new File([blob], name, { type: "application/zip" });
       if (navigator.share && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
@@ -807,18 +984,35 @@
   }
 
   elements.start.addEventListener("click", startCamera);
+  elements.cameraFileButton.addEventListener("click", function () { elements.cameraFileInput.click(); });
+  elements.cameraFileInput.addEventListener("change", function () { openCameraFile(elements.cameraFileInput.files && elements.cameraFileInput.files[0]); });
   elements.scanMore.addEventListener("click", resetSession);
   elements.reset.addEventListener("click", resetSession);
   elements.manualCapture.addEventListener("click", manualCapture);
   elements.undo.addEventListener("click", undoPage);
   elements.newDocument.addEventListener("click", newDocument);
   elements.finish.addEventListener("click", generatePdfs);
+  elements.finishFiles.addEventListener("click", generatePdfs);
   elements.flashButton.addEventListener("click", toggleFlash);
   elements.downloadZip.addEventListener("click", downloadZip);
   elements.switchCamera.addEventListener("click", function () {
     cameraFacing = cameraFacing === "environment" ? "user" : "environment";
     startCamera();
   });
+  elements.keepScan.addEventListener("click", keepReview);
+  elements.retake.addEventListener("click", retakeReview);
+  elements.resetCorners.addEventListener("click", resetReviewCorners);
+  elements.fullImage.addEventListener("click", useFullImage);
+  elements.rotate.addEventListener("click", rotateReview);
+  elements.compare.addEventListener("click", toggleProcessedReview);
+  elements.reviewMode.addEventListener("change", function () {
+    if (showingProcessedReview) { showOriginalReview(); drawReview(); }
+  });
+  elements.reviewCanvas.addEventListener("pointerdown", beginCornerDrag);
+  elements.reviewCanvas.addEventListener("pointermove", moveCorner);
+  elements.reviewCanvas.addEventListener("pointerup", endCornerDrag);
+  elements.reviewCanvas.addEventListener("pointercancel", endCornerDrag);
+  window.addEventListener("resize", function () { if (!elements.review.hidden) drawReview(); });
   elements.menuButton.addEventListener("click", openMenu);
   elements.closeMenu.addEventListener("click", closeMenu);
   elements.scannerMenu.addEventListener("click", function (event) {
@@ -826,9 +1020,13 @@
   });
   window.addEventListener("beforeunload", stopCamera);
   window.addEventListener("resize", function () { if (stream) resizeOverlay(); });
+  document.addEventListener("visibilitychange", function () {
+    clearTimeout(detectionTimer);
+    if (!document.hidden && appPhase === "scanner" && stream) startDetection();
+  });
   if (detectorWorker) {
     detectorWorker.onmessage = function (event) {
-      if (event.data.type === "result") handleDetection(event.data.corners);
+      if (event.data.type === "result") handleDetection(event.data);
       if (event.data.type === "error") {
         detectorBusy = false;
         elements.status.textContent = "Use the capture button if page detection is unavailable.";
