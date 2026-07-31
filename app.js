@@ -55,6 +55,7 @@
     fullImage: document.querySelector("#full-image-button"),
     rotate: document.querySelector("#rotate-button"),
     autoCapture: document.querySelector("#auto-capture-toggle"),
+    edgeDetection: document.querySelector("#edge-detection-toggle"),
     reviewMode: document.querySelector("#review-mode-select"),
     compare: document.querySelector("#compare-button"),
     filmstrip: document.querySelector("#page-filmstrip"),
@@ -565,9 +566,19 @@
 
   function processFrame() {
     if (!opencvReady || appPhase !== "scanner" || !stream || elements.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || isCapturing) return;
-    const videoWidth = elements.video.videoWidth;
-    const videoHeight = elements.video.videoHeight;
+    var videoWidth = elements.video.videoWidth;
+    var videoHeight = elements.video.videoHeight;
     if (!videoWidth || !videoHeight) return;
+
+    if (!elements.edgeDetection.checked) {
+      currentCorners = pageGuideCorners();
+      drawOutline(currentCorners, false, true);
+      stableCorners = [];
+      stableSince = 0;
+      if (requiresPageChange && Date.now() - lastPageSeenAt > PAGE_REMOVED_DELAY) { requiresPageChange = false; elements.manualCapture.disabled = false; elements.status.textContent = "Ready for the next page."; }
+      else if (!requiresPageChange) { elements.status.textContent = "Align it to the dashed " + guideLabel() + " guide."; }
+      return;
+    }
     const scale = Math.min(1, PROCESSING_WIDTH / videoWidth);
     processCanvas.width = Math.round(videoWidth * scale); processCanvas.height = Math.round(videoHeight * scale); processContext = processCanvas.getContext("2d", { willReadFrequently: true });
     processContext.drawImage(elements.video, 0, 0, processCanvas.width, processCanvas.height);
