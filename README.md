@@ -1,0 +1,27 @@
+# Paper Trail Scanner
+
+Client-only mobile document scanner. It uses the phone camera, detects pages with OpenCV.js, creates grayscale PDFs at an effective 200 DPI, and never uploads scans to a server.
+
+## Use Tonight
+
+The camera requires HTTPS on a phone. From this directory, deploy it as a static Vercel site:
+
+```sh
+npx vercel --prod
+```
+
+Open the URL on an iPhone or Android phone, grant camera access, and use the rear camera.
+
+## Scan Workflow
+
+1. Keep one page in view until it captures automatically. Use the center capture button if needed.
+2. Tap **New document** after the last page of a document.
+3. Continue scanning the next document without closing the camera.
+4. Tap **Finish scans** to generate one PDF for every document boundary.
+5. Use **Share** to save each PDF to Files, Drive, or another app. **Open** is the fallback for browsers without file sharing.
+
+PDF pages are grayscale by default and exported at an effective 200 DPI. The PDF size selector defaults to Auto, which recognizes A4 and US Letter or preserves unusual page proportions.
+
+## Compatibility
+
+Target browsers are iPhone Safari, Android Chrome, Samsung Internet, and other modern mobile browsers with `getUserMedia()` camera access. A camera-switch control and manual crop fallback are available for devices where rear-camera selection or automatic page detection is imperfect.

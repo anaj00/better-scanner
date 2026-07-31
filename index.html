@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#10231d" />
+    <title>Paper Trail Scanner</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="app-header">
+        <div>
+          <p class="eyebrow">Continuous document capture</p>
+          <h1>Paper Trail</h1>
+        </div>
+        <button id="reset-button" class="text-button" type="button" hidden>Start over</button>
+      </header>
+
+      <section id="welcome-screen" class="welcome-screen">
+        <div class="hero-mark" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
+        <div>
+          <h2>Scan a stack. Sort it later.</h2>
+          <p>
+            Pages are captured automatically. Tap <strong>New document</strong> whenever the next
+            paper belongs in another PDF.
+          </p>
+        </div>
+        <ul class="feature-list">
+          <li>Grayscale scans at an effective 200 DPI</li>
+          <li>Separate PDFs for each marked document</li>
+          <li>Everything stays on this phone</li>
+        </ul>
+        <button id="start-button" class="primary-button start-button" type="button">Open camera</button>
+        <p id="secure-context-note" class="helper-text" hidden>
+          Camera access requires an HTTPS website.
+        </p>
+      </section>
+
+      <section id="scanner-screen" class="scanner-screen" hidden>
+        <div class="camera-frame">
+          <video id="camera" playsinline muted aria-label="Camera preview"></video>
+          <canvas id="outline-canvas" aria-hidden="true"></canvas>
+          <div id="camera-status" class="camera-status">Finding a page...</div>
+          <div class="camera-controls-top">
+            <button id="switch-camera-button" class="round-button" type="button" aria-label="Switch camera">
+              <span aria-hidden="true">S</span>
+            </button>
+          </div>
+          <div id="capture-flash" class="capture-flash" aria-hidden="true"></div>
+        </div>
+
+        <div class="scan-summary" aria-live="polite">
+          <span id="document-count">Document 1</span>
+          <span id="page-count">0 pages total</span>
+        </div>
+
+        <div class="capture-actions">
+          <button id="undo-button" class="secondary-button" type="button" disabled>Undo page</button>
+          <button id="manual-capture-button" class="capture-button" type="button" aria-label="Capture page">
+            <span></span>
+          </button>
+          <button id="new-document-button" class="secondary-button" type="button" disabled>New document</button>
+        </div>
+
+        <div class="scanner-footer">
+          <label class="page-size-control" for="page-size-select">
+            PDF size
+            <select id="page-size-select">
+              <option value="auto">Auto</option>
+              <option value="a4">A4</option>
+              <option value="letter">US Letter</option>
+            </select>
+          </label>
+          <button id="finish-button" class="primary-button" type="button" disabled>Finish scans</button>
+        </div>
+        <p class="helper-text scanner-tip">Keep one page in view with even lighting. Move it away after capture.</p>
+      </section>
+
+      <section id="results-screen" class="results-screen" hidden>
+        <div class="results-heading">
+          <p class="eyebrow">Ready to save</p>
+          <h2 id="results-title">Your PDFs are ready</h2>
+          <p>Use Share to save each PDF to Files, Drive, or another app on your phone.</p>
+        </div>
+        <div id="results-list" class="results-list"></div>
+        <button id="scan-more-button" class="secondary-button full-width" type="button">Scan another stack</button>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+    <script async src="https://docs.opencv.org/4.10.0/opencv.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
