@@ -10,6 +10,7 @@
   const DPI = 200;
 
   const elements = {
+    appHeader: document.querySelector("#app-header"),
     welcome: document.querySelector("#welcome-screen"),
     scanner: document.querySelector("#scanner-screen"),
     results: document.querySelector("#results-screen"),
@@ -19,6 +20,10 @@
     video: document.querySelector("#camera"),
     outline: document.querySelector("#outline-canvas"),
     status: document.querySelector("#camera-status"),
+    menuButton: document.querySelector("#menu-button"),
+    scannerMenu: document.querySelector("#scanner-menu"),
+    closeMenu: document.querySelector("#close-menu-button"),
+    menuDocuments: document.querySelector("#menu-documents"),
     switchCamera: document.querySelector("#switch-camera-button"),
     flashButton: document.querySelector("#flash-button"),
     manualCapture: document.querySelector("#manual-capture-button"),
@@ -67,6 +72,20 @@
     elements.scanner.hidden = screen !== "scanner";
     elements.results.hidden = screen !== "results";
     elements.reset.hidden = screen === "welcome";
+    elements.appHeader.hidden = screen === "scanner";
+    document.body.classList.toggle("scanning", screen === "scanner");
+    if (screen !== "scanner") closeMenu();
+  }
+
+  function closeMenu() {
+    elements.scannerMenu.hidden = true;
+    elements.menuButton.setAttribute("aria-expanded", "false");
+  }
+
+  function openMenu() {
+    renderMenuDocuments();
+    elements.scannerMenu.hidden = false;
+    elements.menuButton.setAttribute("aria-expanded", "true");
   }
 
   function totalPages() {
@@ -85,6 +104,21 @@
     elements.undo.disabled = pages === 0;
     elements.newDocument.disabled = current.length === 0;
     elements.finish.disabled = pages === 0;
+    renderMenuDocuments();
+  }
+
+  function renderMenuDocuments() {
+    elements.menuDocuments.replaceChildren();
+    documentGroups.forEach(function (group, index) {
+      const row = document.createElement("div");
+      row.className = "menu-document";
+      const name = document.createElement("span");
+      name.textContent = "Document " + (index + 1);
+      const count = document.createElement("span");
+      count.textContent = group.length ? group.length + " " + (group.length === 1 ? "page" : "pages") : "Ready";
+      row.append(name, count);
+      elements.menuDocuments.append(row);
+    });
   }
 
   function stopCamera() {
@@ -98,6 +132,7 @@
     torchEnabled = false;
     elements.flashButton.disabled = true;
     elements.flashButton.textContent = "Flash";
+    closeMenu();
   }
 
   function updateFlashControl() {
@@ -166,6 +201,9 @@
 
     elements.start.disabled = true;
     elements.start.textContent = "Opening camera...";
+    setScreen("scanner");
+    closeMenu();
+    elements.status.textContent = "Opening camera...";
     try {
       stopCamera();
       const constraints = {
@@ -180,7 +218,6 @@
       elements.video.srcObject = stream;
       await elements.video.play();
       updateFlashControl();
-      setScreen("scanner");
       elements.manualCapture.disabled = true;
       elements.status.textContent = "Starting page detection...";
       waitForOpenCv().then(function () {
@@ -204,6 +241,8 @@
         message = "This camera does not support the requested settings. Try switching cameras.";
       }
       showToast(message);
+      stopCamera();
+      setScreen("welcome");
     } finally {
       elements.start.disabled = false;
       elements.start.textContent = "Open camera";
@@ -535,7 +574,9 @@
       const source = cv.imread(sourceCanvas);
       const warped = new cv.Mat();
       const gray = new cv.Mat();
+      const denoised = new cv.Mat();
       const blackAndWhite = new cv.Mat();
+      const cleaned = new cv.Mat();
       const sourcePoints = [];
       corners.forEach(function (point) { sourcePoints.push(point.x * videoWidth, point.y * videoHeight); });
       const sourceMat = cv.matFromArray(4, 1, cv.CV_32FC2, sourcePoints);
@@ -544,14 +585,16 @@
       cv.warpPerspective(source, warped, transform, new cv.Size(dimensions.width, dimensions.height), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
       cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY);
       if (elements.scanMode.value === "black-and-white") {
-        cv.adaptiveThreshold(gray, blackAndWhite, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 31, 12);
+        cv.GaussianBlur(gray, denoised, new cv.Size(3, 3), 0);
+        cv.adaptiveThreshold(denoised, blackAndWhite, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 51, 15);
+        cv.medianBlur(blackAndWhite, cleaned, 3);
       }
       outputCanvas.width = dimensions.width;
       outputCanvas.height = dimensions.height;
-      const output = elements.scanMode.value === "color" ? warped : (elements.scanMode.value === "grayscale" ? gray : blackAndWhite);
+      const output = elements.scanMode.value === "color" ? warped : (elements.scanMode.value === "grayscale" ? gray : cleaned);
       cv.imshow(outputCanvas, output);
       const blob = await canvasToBlob(outputCanvas);
-      source.delete(); warped.delete(); gray.delete(); blackAndWhite.delete(); sourceMat.delete(); destinationMat.delete(); transform.delete();
+      source.delete(); warped.delete(); gray.delete(); denoised.delete(); blackAndWhite.delete(); cleaned.delete(); sourceMat.delete(); destinationMat.delete(); transform.delete();
       if (!blob) throw new Error("Image conversion failed");
       currentGroup().push({ blob: blob, width: dimensions.width, height: dimensions.height, mode: elements.scanMode.value });
       requiresPageChange = true;
@@ -749,7 +792,13 @@
     cameraFacing = cameraFacing === "environment" ? "user" : "environment";
     startCamera();
   });
+  elements.menuButton.addEventListener("click", openMenu);
+  elements.closeMenu.addEventListener("click", closeMenu);
+  elements.scannerMenu.addEventListener("click", function (event) {
+    if (event.target === elements.scannerMenu) closeMenu();
+  });
   window.addEventListener("beforeunload", stopCamera);
   window.addEventListener("resize", function () { if (stream) resizeOverlay(); });
   updateControls();
+  setTimeout(startCamera, 0);
 })();
