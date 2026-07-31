@@ -8,10 +8,10 @@ Client-only mobile document scanner using browser camera APIs, OpenCV.js, pdf-li
 2. Detection tries connected Canny edges, normal Otsu thresholding, and inverse Otsu thresholding.
 3. It accepts the best page-like contour or rectangular fallback without confidence scoring or image fingerprinting.
 4. Auto-capture requires three detected frames with average corner movement below `0.008`.
-5. Capture immediately warps the intrinsic video frame to US Legal dimensions and applies adaptive black-and-white thresholding.
+5. Capture immediately perspective-corrects the intrinsic video frame while preserving the detected rectangle's natural aspect ratio and review image.
 6. The camera rearms after the page has been absent for 650ms. Users can continue scanning into the current filmstrip or start another document.
-7. Camera pages are ready for PDF export immediately. `processing-worker.js` is reserved for imported images and explicit filmstrip edits.
-8. PDFs use US Legal page dimensions and can be shared separately or bundled into a ZIP.
+7. Original mode exports the exact preserved review image. Enhanced color, grayscale, and denoised text modes are optional transformations. `processing-worker.js` is reserved for imported images and explicit filmstrip edits.
+8. Every scan is centered and aspect-fitted without stretching onto a US Legal PDF page. PDFs can be shared separately or bundled into a ZIP.
 
 ## Run
 
@@ -41,4 +41,4 @@ On iPhone Safari, Android Chrome, and Samsung Internet, test camera permission d
 
 ## Limitations
 
-This is a browser approximation, not Apple Notes parity. Torch, camera selection, and downloadable file behavior vary by browser. Camera captures use the current video frame rather than a separate full-resolution still. Processing a 1700x2800 Legal page on the main thread can briefly pause slower phones.
+This is a browser approximation, not Apple Notes parity. Torch, camera selection, and downloadable file behavior vary by browser. Camera captures use the current video frame rather than a separate full-resolution still. Large perspective-corrected images can briefly pause slower phones.

@@ -579,12 +579,6 @@
     return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
   }
 
-  function legalOutputDimensions(corners, sourceWidth, sourceHeight) {
-    const points = corners.map(function (point) { return { x: point.x * sourceWidth, y: point.y * sourceHeight }; }); const top = distance(points[0], points[1]); const bottom = distance(points[3], points[2]); const left = distance(points[0], points[3]); const right = distance(points[1], points[2]);
-    const ratio = Math.min(top, bottom) / Math.max(left, right);
-    return ratio > 1 ? { width: 2800, height: 1700 } : { width: 1700, height: 2800 };
-  }
-
   function canvasToBlob(canvas, type, quality) {
     return new Promise(function (resolve, reject) { canvas.toBlob(function (blob) { blob ? resolve(blob) : reject(new Error("Image encoding failed")); }, type, quality); });
   }
@@ -616,16 +610,20 @@
     const chosenCorners = corners && ScannerGeometry.validateQuad(corners) ? corners.map(function (point) { return { x: point.x, y: point.y }; }) : pageGuideCorners();
     try {
       const videoWidth = elements.video.videoWidth; const videoHeight = elements.video.videoHeight; sourceCanvas.width = videoWidth; sourceCanvas.height = videoHeight; sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(elements.video, 0, 0, videoWidth, videoHeight);
-      const dimensions = legalOutputDimensions(chosenCorners, videoWidth, videoHeight); const input = cv.imread(sourceCanvas); const warped = new cv.Mat(); const gray = new cv.Mat(); const blackAndWhite = new cv.Mat(); mats.push(input, warped, gray, blackAndWhite);
+      const dimensions = outputDimensions(chosenCorners, videoWidth, videoHeight); const input = cv.imread(sourceCanvas); const warped = new cv.Mat(); mats.push(input, warped);
       const sourcePoints = []; chosenCorners.forEach(function (point) { sourcePoints.push(point.x * videoWidth, point.y * videoHeight); });
       const sourceMat = cv.matFromArray(4, 1, cv.CV_32FC2, sourcePoints); const destinationMat = cv.matFromArray(4, 1, cv.CV_32FC2, [0,0,dimensions.width-1,0,dimensions.width-1,dimensions.height-1,0,dimensions.height-1]); const transform = cv.getPerspectiveTransform(sourceMat, destinationMat); mats.push(sourceMat, destinationMat, transform);
-      cv.warpPerspective(input, warped, transform, new cv.Size(dimensions.width, dimensions.height), cv.INTER_LINEAR, cv.BORDER_REPLICATE); cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); cv.adaptiveThreshold(gray, blackAndWhite, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 31, 12);
-      outputCanvas.width = dimensions.width; outputCanvas.height = dimensions.height; cv.imshow(outputCanvas, blackAndWhite); const blob = await canvasToBlob(outputCanvas, "image/png");
+      cv.warpPerspective(input, warped, transform, new cv.Size(dimensions.width, dimensions.height), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
+      const originalCanvas = document.createElement("canvas"); originalCanvas.width = dimensions.width; originalCanvas.height = dimensions.height; cv.imshow(originalCanvas, warped); const originalBlob = await canvasToBlob(originalCanvas, "image/jpeg", .95);
+      const mode = elements.scanMode.value; const mimeType = mode === "black-and-white" ? "image/png" : "image/jpeg"; let blob;
+      outputCanvas.width = dimensions.width; outputCanvas.height = dimensions.height;
+      if (mode === "original") { outputCanvas.getContext("2d").drawImage(originalCanvas, 0, 0); blob = originalBlob; }
+      else { const output = mode === "enhanced-color" ? processEnhancedColor(warped, mats) : mode === "grayscale" ? processGrayscale(warped, mats) : processBlackAndWhite(warped, mats); cv.imshow(outputCanvas, output); blob = await canvasToBlob(outputCanvas, mimeType, .9); }
       if (captureSessionId !== cameraSessionId) return;
       const thumbnailCanvas = document.createElement("canvas"); const thumbnailScale = 200 / Math.max(dimensions.width, dimensions.height); thumbnailCanvas.width = Math.round(dimensions.width * thumbnailScale); thumbnailCanvas.height = Math.round(dimensions.height * thumbnailScale); thumbnailCanvas.getContext("2d").drawImage(outputCanvas, 0, 0, thumbnailCanvas.width, thumbnailCanvas.height); const thumbnailBlob = await canvasToBlob(thumbnailCanvas, "image/jpeg", .72);
       if (captureSessionId !== cameraSessionId) return;
       const fullImage = [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}];
-      const page = { id: makeId(), revision: 1, sequence: pageSequence += 1, createdAt: started, originalImage: blob, detectedCorners: fullImage, refinedCorners: fullImage, finalCorners: fullImage, cornersAreStill: true, detectionConfidence: 1, refinementConfidence: 1, cropStatus: "accepted", qualityWarnings: [], processedImage: blob, processedMimeType: "image/png", processedWidth: dimensions.width, processedHeight: dimensions.height, rotation: 0, scanMode: "black-and-white", status: "ready", cameraCapture: true, previewWidth: dimensions.width, previewHeight: dimensions.height, sourceWidth: dimensions.width, sourceHeight: dimensions.height, thumbnailBlob: thumbnailBlob, thumbnailUrl: URL.createObjectURL(thumbnailBlob), processingAttempts: 0, timings: { totalReadyMs: performance.now() - started }, cancelled: false };
+      const page = { id: makeId(), revision: 1, sequence: pageSequence += 1, createdAt: started, originalImage: originalBlob, detectedCorners: fullImage, refinedCorners: fullImage, finalCorners: fullImage, cornersAreStill: true, detectionConfidence: 1, refinementConfidence: 1, cropStatus: "accepted", qualityWarnings: [], processedImage: blob, processedMimeType: mimeType, processedWidth: dimensions.width, processedHeight: dimensions.height, rotation: 0, scanMode: mode, status: "ready", previewWidth: dimensions.width, previewHeight: dimensions.height, sourceWidth: dimensions.width, sourceHeight: dimensions.height, thumbnailBlob: thumbnailBlob, thumbnailUrl: URL.createObjectURL(thumbnailBlob), processingAttempts: 0, timings: { totalReadyMs: performance.now() - started }, cancelled: false };
       targetGroup.push(page); requiresPageChange = true; lastPageSeenAt = Date.now(); stableCorners = [];
       elements.manualCapture.disabled = true; updateControls(); showCaptureFeedback(page); elements.status.textContent = "Move the page away, then show the next one.";
       setTimeout(function () { if (requiresPageChange) elements.status.textContent = "Move the page away, then show the next one."; }, PAGE_CHANGE_DELAY);
@@ -793,10 +791,10 @@
   }
 
   function processBlackAndWhite(warped, mats) {
-    const gray = new cv.Mat(); const background = new cv.Mat(); const normalized = new cv.Mat(); const blurred = new cv.Mat(); const output = new cv.Mat(); mats.push(gray, background, normalized, blurred, output);
-    cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); cv.GaussianBlur(gray, background, new cv.Size(0, 0), Math.max(12, Math.round(Math.max(warped.rows, warped.cols) / 45))); cv.divide(gray, background, normalized, 220); cv.GaussianBlur(normalized, blurred, new cv.Size(3, 3), 0);
-    let blockSize = Math.round(Math.min(warped.rows, warped.cols) / 30) | 1; blockSize = Math.max(31, Math.min(81, blockSize));
-    cv.adaptiveThreshold(blurred, output, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, blockSize, 10); return output;
+    const gray = new cv.Mat(); const background = new cv.Mat(); const normalized = new cv.Mat(); const blurred = new cv.Mat(); const denoised = new cv.Mat(); const output = new cv.Mat(); mats.push(gray, background, normalized, blurred, denoised, output);
+    cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); cv.GaussianBlur(gray, background, new cv.Size(0, 0), Math.max(12, Math.round(Math.max(warped.rows, warped.cols) / 45))); cv.divide(gray, background, normalized, 220); cv.GaussianBlur(normalized, blurred, new cv.Size(3, 3), 0); cv.medianBlur(blurred, denoised, 3);
+    let blockSize = Math.round(Math.min(warped.rows, warped.cols) / 22) | 1; blockSize = Math.max(51, Math.min(101, blockSize));
+    cv.adaptiveThreshold(denoised, output, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, blockSize, 13); return output;
   }
 
   function reviewPointFromEvent(event) {
