@@ -39,11 +39,15 @@
         </div>
 
         <div class="camera-actions">
-          <button id="redo-button" class="camera-action-button camera-action-undo" type="button" disabled>Undo</button>
+          <button id="undo-button" class="camera-action-button camera-action-undo" type="button" disabled aria-label="Undo last page">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7 4 12l5 5M4 12h10a6 6 0 1 1-6 6" /></svg>
+          </button>
           <button id="manual-capture-button" class="capture-button" type="button" aria-label="Capture page">
             <span></span>
           </button>
-          <button id="new-document-button" class="camera-action-button camera-action-new" type="button" disabled>New document</button>
+          <button id="new-document-button" class="camera-action-button camera-action-new" type="button" disabled aria-label="Start a new document">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6zM14 3v5h5M12 11v6m-3-3h6" /></svg>
+          </button>
         </div>
 
         <aside id="scanner-menu" class="scanner-menu" hidden aria-label="Scan options">

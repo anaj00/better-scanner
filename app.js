@@ -27,7 +27,7 @@
     switchCamera: document.querySelector("#switch-camera-button"),
     flashButton: document.querySelector("#flash-button"),
     manualCapture: document.querySelector("#manual-capture-button"),
-    undo: document.querySelector("#redo-button"),
+    undo: document.querySelector("#undo-button"),
     newDocument: document.querySelector("#new-document-button"),
     finish: document.querySelector("#finish-button"),
     documentCount: document.querySelector("#document-count"),
@@ -364,10 +364,10 @@
     const left = scaledDistance(points[3], points[0]);
     const shortestSide = Math.min(top, right, bottom, left);
     const longestSide = Math.max(top, right, bottom, left);
-    if (shortestSide < Math.min(canvas.width, canvas.height) * .25 || longestSide / shortestSide > 2.3) return -Infinity;
+    if (shortestSide < Math.min(canvas.width, canvas.height) * .2 || longestSide / shortestSide > 2.5) return -Infinity;
     const pageRatio = Math.min((top + bottom) / 2, (left + right) / 2) / Math.max((top + bottom) / 2, (left + right) / 2);
     const expectedRatio = 8.5 / 14;
-    if (Math.abs(pageRatio - expectedRatio) > .18) return -Infinity;
+    if (Math.abs(pageRatio - expectedRatio) > .24) return -Infinity;
     let area = 0;
     let centerX = 0;
     let centerY = 0;
@@ -378,22 +378,22 @@
       centerY += point.y;
     });
     area = Math.abs(area) / 2;
-    if (area < .18 || area > .92) return -Infinity;
+    if (area < .13 || area > .92) return -Infinity;
     const distanceFromCenter = Math.hypot(centerX / 4 - .5, centerY / 4 - .5);
     return area * (1 - Math.min(.35, distanceFromCenter * .35));
   }
 
-  function bestRectangleFromMask(mask, canvas) {
+  function bestRectangleFromMask(mask, canvas, retrievalMode, minimumCoverage) {
     const contours = new cv.MatVector();
     const hierarchy = new cv.Mat();
     let best;
     let bestScore = -Infinity;
     try {
-      cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+      cv.findContours(mask, contours, hierarchy, retrievalMode, cv.CHAIN_APPROX_SIMPLE);
       for (let index = 0; index < contours.size(); index += 1) {
         const contour = contours.get(index);
         const contourArea = Math.abs(cv.contourArea(contour));
-        if (contourArea >= canvas.width * canvas.height * .14) {
+        if (contourArea >= canvas.width * canvas.height * minimumCoverage) {
           const perimeter = cv.arcLength(contour, true);
           const approximation = new cv.Mat();
           cv.approxPolyDP(contour, approximation, .018 * perimeter, true);
@@ -445,18 +445,21 @@
       // Canny finds clear outer borders. Closing bridges small gaps without merging form fields.
       cv.Canny(blurred, edges, 20, 90);
       cv.morphologyEx(edges, connectedEdges, cv.MORPH_CLOSE, kernel);
-      let rectangle = bestRectangleFromMask(connectedEdges, canvas);
+      let rectangle = bestRectangleFromMask(connectedEdges, canvas, cv.RETR_EXTERNAL, .1);
+      if (!rectangle) rectangle = bestRectangleFromMask(connectedEdges, canvas, cv.RETR_LIST, .18);
       if (rectangle) return rectangle;
 
       // A light page on a darker table often has no continuous Canny border.
       cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
       cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel);
-      rectangle = bestRectangleFromMask(threshold, canvas);
+      rectangle = bestRectangleFromMask(threshold, canvas, cv.RETR_EXTERNAL, .1);
+      if (!rectangle) rectangle = bestRectangleFromMask(threshold, canvas, cv.RETR_LIST, .18);
       if (rectangle) return rectangle;
 
       cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
       cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel);
-      return bestRectangleFromMask(threshold, canvas);
+      rectangle = bestRectangleFromMask(threshold, canvas, cv.RETR_EXTERNAL, .1);
+      return rectangle || bestRectangleFromMask(threshold, canvas, cv.RETR_LIST, .18);
     } finally {
       src.delete();
       gray.delete();
@@ -579,6 +582,8 @@
       const source = cv.imread(sourceCanvas);
       const warped = new cv.Mat();
       const gray = new cv.Mat();
+      const background = new cv.Mat();
+      const normalized = new cv.Mat();
       const denoised = new cv.Mat();
       const blackAndWhite = new cv.Mat();
       const cleaned = new cv.Mat();
@@ -590,7 +595,9 @@
       cv.warpPerspective(source, warped, transform, new cv.Size(dimensions.width, dimensions.height), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
       cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY);
       if (elements.scanMode.value === "black-and-white") {
-        cv.GaussianBlur(gray, denoised, new cv.Size(5, 5), 0);
+        cv.GaussianBlur(gray, background, new cv.Size(0, 0), 25);
+        cv.divide(gray, background, normalized, 255);
+        cv.GaussianBlur(normalized, denoised, new cv.Size(3, 3), 0);
         cv.threshold(denoised, blackAndWhite, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
         cv.medianBlur(blackAndWhite, cleaned, 3);
       }
@@ -599,7 +606,7 @@
       const output = elements.scanMode.value === "color" ? warped : (elements.scanMode.value === "grayscale" ? gray : cleaned);
       cv.imshow(outputCanvas, output);
       const blob = await canvasToBlob(outputCanvas);
-      source.delete(); warped.delete(); gray.delete(); denoised.delete(); blackAndWhite.delete(); cleaned.delete(); sourceMat.delete(); destinationMat.delete(); transform.delete();
+      source.delete(); warped.delete(); gray.delete(); background.delete(); normalized.delete(); denoised.delete(); blackAndWhite.delete(); cleaned.delete(); sourceMat.delete(); destinationMat.delete(); transform.delete();
       if (!blob) throw new Error("Image conversion failed");
       currentGroup().push({ blob: blob, width: dimensions.width, height: dimensions.height, mode: elements.scanMode.value });
       requiresPageChange = true;
