@@ -512,20 +512,21 @@
     return area * (1 - Math.min(.35, Math.hypot(center.x - .5, center.y - .5) * .35));
   }
 
-  function bestRectangleFromMask(mask, canvas) {
+  function bestRectangleFromMask(mask, canvas, allowPartialEdges) {
     const contours = new cv.MatVector(); const hierarchy = new cv.Mat(); let best; let bestScore = -Infinity;
     try {
       cv.findContours(mask, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
       for (let index = 0; index < contours.size(); index += 1) {
         const contour = contours.get(index); let approximation; let box;
         try {
-          const contourArea = Math.abs(cv.contourArea(contour));
-          if (contourArea >= canvas.width * canvas.height * .055) {
-            const perimeter = cv.arcLength(contour, true); approximation = new cv.Mat(); cv.approxPolyDP(contour, approximation, .018 * perimeter, true); let points; let score = -Infinity;
+          const contourArea = Math.abs(cv.contourArea(contour)); const frameArea = canvas.width * canvas.height; const perimeter = cv.arcLength(contour, true); const substantialContour = contourArea >= frameArea * .055; const substantialPartialEdges = allowPartialEdges && perimeter >= Math.min(canvas.width, canvas.height) * .65;
+          if (substantialContour || substantialPartialEdges) {
+            approximation = new cv.Mat(); cv.approxPolyDP(contour, approximation, .018 * perimeter, true); let points; let score = -Infinity;
             if (approximation.rows === 4 && cv.isContourConvex(approximation)) { points = normalizedPointsFromMat(approximation, canvas, false); score = rectangleScore(points) + .15; }
             else {
               const rotatedRect = cv.minAreaRect(contour); const rotatedArea = rotatedRect.size.width * rotatedRect.size.height; const rectangularity = rotatedArea ? contourArea / rotatedArea : 0;
-              if (approximation.rows >= 3 && approximation.rows <= 6 && rectangularity > .32) { box = cv.boxPoints(rotatedRect); points = normalizedPointsFromMat(box, canvas, true); score = rectangleScore(points) * rectangularity; }
+              const rectanglePerimeter = 2 * (rotatedRect.size.width + rotatedRect.size.height); const perimeterCoverage = rectanglePerimeter ? perimeter / rectanglePerimeter : 0; const regularFallback = approximation.rows >= 3 && approximation.rows <= 6 && rectangularity > .32; const partialFallback = allowPartialEdges && approximation.rows >= 2 && approximation.rows <= 10 && rotatedArea >= frameArea * .1 && perimeterCoverage >= .35;
+              if (regularFallback || partialFallback) { box = cv.boxPoints(rotatedRect); points = normalizedPointsFromMat(box, canvas, true); score = rectangleScore(points) * (regularFallback ? rectangularity : Math.min(.78, perimeterCoverage * .7)); }
             }
             if (score > bestScore) { best = points; bestScore = score; }
           }
@@ -539,9 +540,9 @@
     const source = cv.imread(canvas); const gray = new cv.Mat(); const blurred = new cv.Mat(); const edges = new cv.Mat(); const connectedEdges = new cv.Mat(); const threshold = new cv.Mat(); const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
     try {
       cv.cvtColor(source, gray, cv.COLOR_RGBA2GRAY); cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0); cv.Canny(blurred, edges, 20, 90); cv.morphologyEx(edges, connectedEdges, cv.MORPH_CLOSE, kernel); cv.dilate(connectedEdges, connectedEdges, kernel);
-      let rectangle = bestRectangleFromMask(connectedEdges, canvas); if (rectangle) return rectangle;
-      cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU); cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel); rectangle = bestRectangleFromMask(threshold, canvas); if (rectangle) return rectangle;
-      cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU); cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel); return bestRectangleFromMask(threshold, canvas);
+      let rectangle = bestRectangleFromMask(connectedEdges, canvas, true); if (rectangle) return rectangle;
+      cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU); cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel); rectangle = bestRectangleFromMask(threshold, canvas, false); if (rectangle) return rectangle;
+      cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU); cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel); return bestRectangleFromMask(threshold, canvas, false);
     } finally { source.delete(); gray.delete(); blurred.delete(); edges.delete(); connectedEdges.delete(); threshold.delete(); kernel.delete(); }
   }
 
@@ -592,7 +593,7 @@
 
   function outputDimensions(corners, sourceWidth, sourceHeight) {
     const points = corners.map(function (point) { return { x: point.x * sourceWidth, y: point.y * sourceHeight }; });
-    const width = Math.max(distance(points[0], points[1]), distance(points[3], points[2])); const height = Math.max(distance(points[0], points[3]), distance(points[1], points[2])); const scale = Math.min(1, 2400 / Math.max(width, height), Math.sqrt(5000000 / (width * height)));
+    const width = Math.max(distance(points[0], points[1]), distance(points[3], points[2])); const height = Math.max(distance(points[0], points[3]), distance(points[1], points[2])); const scale = Math.min(1, 2200 / Math.max(width, height), Math.sqrt(4000000 / (width * height)));
     return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
   }
 
@@ -807,9 +808,9 @@
   }
 
   function processBlackAndWhite(warped, mats) {
-    const gray = new cv.Mat(); const background = new cv.Mat(); const normalized = new cv.Mat(); const denoised = new cv.Mat(); const binary = new cv.Mat(); const output = new cv.Mat(); mats.push(gray, background, normalized, denoised, binary, output);
-    const backgroundSize = Math.max(31, Math.min(81, Math.round(Math.min(warped.rows, warped.cols) / 24) | 1)); cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); cv.blur(gray, background, new cv.Size(backgroundSize, backgroundSize)); cv.divide(gray, background, normalized, 250); cv.medianBlur(normalized, denoised, 3);
-    let blockSize = Math.round(Math.min(warped.rows, warped.cols) / 18) | 1; blockSize = Math.max(61, Math.min(121, blockSize)); cv.adaptiveThreshold(denoised, binary, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, blockSize, 15); cv.addWeighted(denoised, .25, binary, .75, 0, output); return output;
+    const gray = new cv.Mat(); const small = new cv.Mat(); const smallBackground = new cv.Mat(); const background = new cv.Mat(); const normalized = new cv.Mat(); const denoised = new cv.Mat(); const binary = new cv.Mat(); const output = new cv.Mat(); mats.push(gray, small, smallBackground, background, normalized, denoised, binary, output);
+    cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); const illuminationScale = Math.min(1, 256 / Math.max(gray.cols, gray.rows)); const illuminationSize = new cv.Size(Math.max(1, Math.round(gray.cols * illuminationScale)), Math.max(1, Math.round(gray.rows * illuminationScale))); cv.resize(gray, small, illuminationSize, 0, 0, cv.INTER_AREA); cv.GaussianBlur(small, smallBackground, new cv.Size(15, 15), 0); cv.resize(smallBackground, background, new cv.Size(gray.cols, gray.rows), 0, 0, cv.INTER_LINEAR); cv.divide(gray, background, normalized, 250); cv.medianBlur(normalized, denoised, 3);
+    cv.adaptiveThreshold(denoised, binary, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 61, 15); cv.addWeighted(denoised, .25, binary, .75, 0, output); return output;
   }
 
   function reviewPointFromEvent(event) {
