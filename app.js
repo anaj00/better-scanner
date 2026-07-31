@@ -2,9 +2,9 @@
 (function () {
   "use strict";
 
-  const PROCESSING_WIDTH = 600;
-  const AUTO_CAPTURE_STABLE_FRAMES = 3;
-  const DETECTION_INTERVAL = 100;
+  const PROCESSING_WIDTH = 480;
+  const AUTO_CAPTURE_STABLE_FRAMES = 2;
+  const DETECTION_INTERVAL = 180;
   const PAGE_REMOVED_DELAY = 350;
   const PAGE_CHANGE_DELAY = 450;
   const DPI = 200;
@@ -122,7 +122,7 @@
   }
 
   function stopCamera() {
-    clearInterval(detectionTimer);
+    clearTimeout(detectionTimer);
     detectionTimer = undefined;
     if (stream) {
       stream.getTracks().forEach(function (track) { track.stop(); });
@@ -250,8 +250,13 @@
   }
 
   function startDetection() {
-    clearInterval(detectionTimer);
-    detectionTimer = setInterval(processFrame, DETECTION_INTERVAL);
+    clearTimeout(detectionTimer);
+    const tick = function () {
+      if (!stream) return;
+      processFrame();
+      detectionTimer = setTimeout(tick, DETECTION_INTERVAL);
+    };
+    tick();
   }
 
   function resizeOverlay() {
@@ -446,20 +451,17 @@
       cv.Canny(blurred, edges, 20, 90);
       cv.morphologyEx(edges, connectedEdges, cv.MORPH_CLOSE, kernel);
       let rectangle = bestRectangleFromMask(connectedEdges, canvas, cv.RETR_EXTERNAL, .1);
-      if (!rectangle) rectangle = bestRectangleFromMask(connectedEdges, canvas, cv.RETR_LIST, .18);
       if (rectangle) return rectangle;
 
       // A light page on a darker table often has no continuous Canny border.
       cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
       cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel);
       rectangle = bestRectangleFromMask(threshold, canvas, cv.RETR_EXTERNAL, .1);
-      if (!rectangle) rectangle = bestRectangleFromMask(threshold, canvas, cv.RETR_LIST, .18);
       if (rectangle) return rectangle;
 
       cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
       cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel);
-      rectangle = bestRectangleFromMask(threshold, canvas, cv.RETR_EXTERNAL, .1);
-      return rectangle || bestRectangleFromMask(threshold, canvas, cv.RETR_LIST, .18);
+      return bestRectangleFromMask(threshold, canvas, cv.RETR_EXTERNAL, .1);
     } finally {
       src.delete();
       gray.delete();
