@@ -62,7 +62,10 @@ function scoreRectangle(points, width, height) {
 function pointsFromMat(mat, width, height, floating) {
   const points = [];
   for (let index = 0; index < 4; index += 1) {
-    const point = floating ? mat.floatPtr(index, 0) : mat.intPtr(index, 0);
+    const offset = index * 2;
+    const point = floating
+      ? [mat.data32F[offset], mat.data32F[offset + 1]]
+      : [mat.data32S[offset], mat.data32S[offset + 1]];
     points.push({ x: point[0] / width, y: point[1] / height });
   }
   return orderCorners(points);
