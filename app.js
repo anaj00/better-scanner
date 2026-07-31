@@ -2,9 +2,9 @@
 (function () {
   "use strict";
 
-  const PROCESSING_WIDTH = 480;
+  const PROCESSING_WIDTH = 360;
   const AUTO_CAPTURE_STABLE_FRAMES = 2;
-  const DETECTION_INTERVAL = 180;
+  const DETECTION_INTERVAL = 160;
   const PAGE_REMOVED_DELAY = 350;
   const PAGE_CHANGE_DELAY = 450;
   const DPI = 200;
@@ -59,6 +59,7 @@
   const processCanvas = document.createElement("canvas");
   const sourceCanvas = document.createElement("canvas");
   const outputCanvas = document.createElement("canvas");
+  let processContext;
 
   function showToast(message) {
     clearTimeout(toastTimer);
@@ -369,10 +370,9 @@
     const left = scaledDistance(points[3], points[0]);
     const shortestSide = Math.min(top, right, bottom, left);
     const longestSide = Math.max(top, right, bottom, left);
-    if (shortestSide < Math.min(canvas.width, canvas.height) * .2 || longestSide / shortestSide > 2.5) return -Infinity;
+    if (shortestSide < Math.min(canvas.width, canvas.height) * .14 || longestSide / shortestSide > 3.2) return -Infinity;
     const pageRatio = Math.min((top + bottom) / 2, (left + right) / 2) / Math.max((top + bottom) / 2, (left + right) / 2);
     const expectedRatio = 8.5 / 14;
-    if (Math.abs(pageRatio - expectedRatio) > .24) return -Infinity;
     let area = 0;
     let centerX = 0;
     let centerY = 0;
@@ -383,9 +383,10 @@
       centerY += point.y;
     });
     area = Math.abs(area) / 2;
-    if (area < .13 || area > .92) return -Infinity;
+    if (area < .08 || area > .92) return -Infinity;
     const distanceFromCenter = Math.hypot(centerX / 4 - .5, centerY / 4 - .5);
-    return area * (1 - Math.min(.35, distanceFromCenter * .35));
+    const aspectMatch = Math.max(0, 1 - Math.abs(pageRatio - expectedRatio) * 1.4);
+    return area * aspectMatch * (1 - Math.min(.35, distanceFromCenter * .35));
   }
 
   function bestRectangleFromMask(mask, canvas, retrievalMode, minimumCoverage) {
@@ -458,10 +459,7 @@
       cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel);
       rectangle = bestRectangleFromMask(threshold, canvas, cv.RETR_EXTERNAL, .1);
       if (rectangle) return rectangle;
-
-      cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
-      cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel);
-      return bestRectangleFromMask(threshold, canvas, cv.RETR_EXTERNAL, .1);
+      return undefined;
     } finally {
       src.delete();
       gray.delete();
@@ -492,9 +490,14 @@
     const videoHeight = elements.video.videoHeight;
     if (!videoWidth || !videoHeight) return;
     const scale = Math.min(1, PROCESSING_WIDTH / videoWidth);
-    processCanvas.width = Math.round(videoWidth * scale);
-    processCanvas.height = Math.round(videoHeight * scale);
-    processCanvas.getContext("2d", { willReadFrequently: true }).drawImage(elements.video, 0, 0, processCanvas.width, processCanvas.height);
+    const processingWidth = Math.round(videoWidth * scale);
+    const processingHeight = Math.round(videoHeight * scale);
+    if (processCanvas.width !== processingWidth || processCanvas.height !== processingHeight) {
+      processCanvas.width = processingWidth;
+      processCanvas.height = processingHeight;
+      processContext = processCanvas.getContext("2d", { willReadFrequently: true });
+    }
+    processContext.drawImage(elements.video, 0, 0, processCanvas.width, processCanvas.height);
     let corners;
     try {
       corners = quadrilateralFromCanvas(processCanvas);
