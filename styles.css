@@ -128,7 +128,7 @@ h2 { margin-bottom: .7rem; font-size: clamp(2rem, 9vw, 2.8rem); line-height: 1.0
   position: absolute;
   z-index: 1;
   right: 1rem;
-  bottom: max(7.4rem, calc(env(safe-area-inset-bottom) + 6.5rem));
+  bottom: max(12.3rem, calc(env(safe-area-inset-bottom) + 11.4rem));
   left: 1rem;
   color: rgba(255, 255, 255, .88);
   font-size: .78rem;
@@ -182,6 +182,17 @@ h2 { margin-bottom: .7rem; font-size: clamp(2rem, 9vw, 2.8rem); line-height: 1.0
 .capture-button span { display: block; width: 4.35rem; height: 4.35rem; border-radius: 50%; background: #fff; box-shadow: inset 0 0 0 1px #d8d8d8; transition: transform .15s ease; }
 .capture-button:active span { transform: scale(.88); }
 
+.page-filmstrip { position: absolute; z-index: 2; right: .75rem; bottom: max(6.6rem, calc(env(safe-area-inset-bottom) + 5.8rem)); left: .75rem; display: flex; min-height: 4.5rem; gap: .45rem; overflow-x: auto; padding: .35rem; scrollbar-width: none; }
+.page-filmstrip::-webkit-scrollbar { display: none; }
+.filmstrip-page { position: relative; flex: 0 0 3.8rem; height: 4.8rem; overflow: hidden; padding: 0; border: 1px solid rgba(255, 255, 255, .55); border-radius: .45rem; background: rgba(0, 0, 0, .62); color: #fff; }
+.filmstrip-page img { width: 100%; height: 100%; object-fit: cover; }
+.filmstrip-page .page-number { position: absolute; right: .2rem; bottom: .15rem; padding: .08rem .25rem; border-radius: .25rem; background: rgba(0, 0, 0, .72); font-size: .62rem; }
+.filmstrip-page .page-badge { position: absolute; top: .15rem; left: .15rem; width: .65rem; height: .65rem; border-radius: 50%; background: #f5b942; }
+.filmstrip-page.needs-crop .page-badge, .filmstrip-page.error .page-badge { background: #ee645b; }
+.filmstrip-page.processing::after { position: absolute; inset: 35%; border: 2px solid rgba(255, 255, 255, .35); border-top-color: #fff; border-radius: 50%; content: ""; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.capture-feedback { position: absolute; z-index: 3; right: 1rem; bottom: max(11.4rem, calc(env(safe-area-inset-bottom) + 10.6rem)); left: 1rem; display: flex; align-items: center; justify-content: center; gap: .6rem; color: #fff; font-size: .8rem; text-shadow: 0 1px 3px #000; }.capture-feedback[hidden] { display: none; }.capture-feedback button { border: 0; background: transparent; color: #d7f770; font: inherit; font-weight: 800; text-decoration: underline; }
+
 .scanner-menu {
   position: absolute;
   z-index: 4;
@@ -232,6 +243,7 @@ h2 { margin-bottom: .7rem; font-size: clamp(2rem, 9vw, 2.8rem); line-height: 1.0
 .review-screen[hidden] { display: none; }
 .review-header { display: flex; align-items: center; justify-content: space-between; }.review-stage { position: relative; min-height: 0; overflow: hidden; border-radius: .8rem; background: #050805; }.review-stage img, .review-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }.review-stage canvas { touch-action: none; }.review-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: .5rem; }.review-screen .helper-text { text-align: center; }
 .review-stage canvas[hidden] { display: none; }
+.flagged-screen { display: grid; gap: 1rem; padding-top: 1rem; }.flagged-screen[hidden] { display: none; }.flagged-screen p { color: #b7c2b9; }.flagged-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(6rem, 1fr)); gap: .65rem; }.flagged-page { position: relative; overflow: hidden; min-height: 8rem; border: 1px solid #506057; border-radius: .65rem; background: #18211c; color: #fff; }.flagged-page img { width: 100%; height: 6rem; object-fit: cover; }.flagged-page span { display: block; padding: .4rem; font-size: .72rem; }
 
 .toast { position: fixed; z-index: 30; right: 1rem; bottom: max(1rem, env(safe-area-inset-bottom)); left: 1rem; max-width: 32rem; margin: auto; padding: .75rem .9rem; border-radius: .65rem; background: #f6f8f5; color: #111714; box-shadow: 0 .5rem 1.5rem rgba(0, 0, 0, .32); font-size: .84rem; font-weight: 700; text-align: center; transform: translateY(150%); transition: transform .2s ease; }
 .toast.visible { transform: translateY(0); }

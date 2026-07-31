@@ -10,10 +10,11 @@ Client-only mobile document scanner using browser camera APIs, OpenCV.js, pdf-li
 4. The overlay is exponentially smoothed (`alpha = 0.38`). A changed candidate resets smoothing and readiness.
 5. Auto-capture requires six stable results, confidence of at least `0.70`, acceptable exposure/focus, and at least 900ms sustained readiness.
 6. Capture prefers `ImageCapture.takePhoto()` and falls back to the intrinsic video frame.
-7. Approximate preview corners are mapped to the still and locally refined. Every capture then opens the draggable corner editor.
-8. Perspective correction uses measured edge lengths and never stretches the crop to a paper ratio.
-9. Pages are generated as Enhanced color (default), Grayscale, Black and white, or Original. Color/grayscale use JPEG; B&W uses PNG.
-10. PDFs use US Legal page dimensions and fit the natural scan without distortion. PDFs can be shared separately or bundled into a ZIP.
+7. A capture is admitted immediately, preserves the original high-resolution Blob, and adds a thumbnail to the filmstrip without closing the camera.
+8. `processing-worker.js` processes one page at a time: it maps preview corners to the still, locally refines edges, applies perspective correction, and enhances the selected scan mode. Processing is bounded according to reported device memory.
+9. High-confidence crops continue without interruption. Questionable crops and processing failures are collected for deferred review when Finish is tapped; any filmstrip thumbnail can also open the draggable editor during scanning.
+10. Pages are generated as Enhanced color (default), Grayscale, Black and white, or Original. Color/grayscale use JPEG; B&W uses PNG. Worker failures are retried once while originals remain available.
+11. PDFs use US Legal page dimensions and fit the natural scan without distortion. Unsupported preserved image formats are converted to JPEG before fallback export. PDFs can be shared separately or bundled into a ZIP.
 
 ## Run
 
@@ -39,8 +40,8 @@ The fixture page displays the selected quadrilateral, confidence, mask, candidat
 
 ## Mobile Testing
 
-On iPhone Safari and Android Chrome, test camera permission denial, rear-camera selection, manual capture, auto-capture on/off, review handle dragging, rotation, all four processing modes, retake, undo, document boundaries, PDF sharing, and ZIP saving. Also background/resume the browser during an active session.
+On iPhone Safari, Android Chrome, and Samsung Internet, test camera permission denial, rear-camera selection, uninterrupted manual and automatic multi-page capture, duplicate suppression, page replacement rearming, filmstrip editing, deferred flagged-page review, handle dragging, rotation, all four processing modes, retake, undo, document boundaries, PDF sharing, and ZIP saving. Also background/resume the browser during an active session.
 
 ## Limitations
 
-This is a browser approximation, not Apple Notes parity. `ImageCapture`, torch, camera selection, still-photo framing, and downloadable file behavior vary by browser. Safari often uses the video-frame fallback. The review editor remains authoritative when still-photo framing differs from the preview. Large scan batches can exceed a mobile browser's memory limit; pages are bounded to a 2400px maximum dimension and generated sequentially.
+This is a browser approximation, not Apple Notes parity. `ImageCapture`, torch, camera selection, still-photo framing, and downloadable file behavior vary by browser. Safari often uses the video-frame fallback. The review editor remains authoritative when still-photo framing differs from the preview. Originals currently remain in memory rather than IndexedDB, so large 30-50 page batches can exceed a mobile browser's memory limit. Processing input and output dimensions are bounded according to available device-memory hints.

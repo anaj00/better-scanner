@@ -41,6 +41,9 @@
           <div id="capture-flash" class="capture-flash" aria-hidden="true"></div>
         </div>
 
+        <div id="page-filmstrip" class="page-filmstrip" role="list" aria-label="Captured pages"></div>
+        <div id="capture-feedback" class="capture-feedback" hidden><span id="capture-feedback-text"></span><button id="capture-feedback-undo" type="button">Undo</button></div>
+
         <div class="camera-actions">
           <button id="undo-button" class="camera-action-button camera-action-undo" type="button" disabled aria-label="Undo last page">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7 4 12l5 5M4 12h10a6 6 0 1 1-6 6" /></svg>
@@ -91,7 +94,7 @@
       <section id="review-screen" class="review-screen" hidden>
         <div class="review-header">
           <button id="retake-button" class="text-button" type="button">Retake</button>
-          <strong>Review scan</strong>
+          <strong id="review-title">Review scan</strong>
           <button id="keep-scan-button" class="text-button" type="button">Keep</button>
         </div>
         <div id="review-stage" class="review-stage">
@@ -108,6 +111,15 @@
           <button id="compare-button" class="utility-button" type="button">Preview processed</button>
         </div>
         <p class="helper-text">Drag the four corners if the outline needs correction.</p>
+        <button id="delete-page-button" class="text-button" type="button">Delete page</button>
+      </section>
+
+      <section id="flagged-screen" class="flagged-screen" hidden>
+        <h2>Some pages may need attention</h2>
+        <p>Only questionable crops are shown here. Accepted pages are ready.</p>
+        <div id="flagged-list" class="flagged-list"></div>
+        <button id="review-flagged-button" class="primary-button" type="button">Review flagged pages</button>
+        <button id="continue-anyway-button" class="text-button" type="button">Continue anyway</button>
       </section>
 
       <section id="results-screen" class="results-screen" hidden>

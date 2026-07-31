@@ -5,9 +5,15 @@
   const PROCESSING_WIDTH = 480;
   const AUTO_CAPTURE_STABLE_FRAMES = 6;
   const DETECTION_INTERVAL = 125;
-  const PAGE_REMOVED_DELAY = 900;
-  const PAGE_CHANGE_DELAY = 450;
   const DEBUG_MODE = new URLSearchParams(location.search).get("debug") === "1";
+  const HIGH_CONFIDENCE = .82;
+  const MEDIUM_CONFIDENCE = .62;
+  const SAFE_BORDER_MARGIN = .015;
+  const STRONG_EDGE_SUPPORT = .55;
+  const DUPLICATE_DISTANCE = 5;
+  const REARM_DIFFERENCE = 14;
+  const REARM_DIFFERENT_FRAMES = 3;
+  const MAX_PROCESS_QUEUE = 6;
 
   const elements = {
     appHeader: document.querySelector("#app-header"),
@@ -15,6 +21,7 @@
     scanner: document.querySelector("#scanner-screen"),
     results: document.querySelector("#results-screen"),
     review: document.querySelector("#review-screen"),
+    flagged: document.querySelector("#flagged-screen"),
     start: document.querySelector("#start-button"),
     cameraFileButton: document.querySelector("#camera-file-button"),
     cameraFileInput: document.querySelector("#camera-file-input"),
@@ -54,7 +61,16 @@
     rotate: document.querySelector("#rotate-button"),
     autoCapture: document.querySelector("#auto-capture-toggle"),
     reviewMode: document.querySelector("#review-mode-select"),
-    compare: document.querySelector("#compare-button")
+    compare: document.querySelector("#compare-button"),
+    filmstrip: document.querySelector("#page-filmstrip"),
+    captureFeedback: document.querySelector("#capture-feedback"),
+    captureFeedbackText: document.querySelector("#capture-feedback-text"),
+    captureFeedbackUndo: document.querySelector("#capture-feedback-undo"),
+    reviewTitle: document.querySelector("#review-title"),
+    deletePage: document.querySelector("#delete-page-button"),
+    flaggedList: document.querySelector("#flagged-list"),
+    reviewFlagged: document.querySelector("#review-flagged-button"),
+    continueAnyway: document.querySelector("#continue-anyway-button")
   };
 
   let stream;
@@ -82,6 +98,7 @@
   let displayCorners = null;
   let lastReliableCorners = null;
   let lastDetectorMetrics = null;
+  let lastDetectionConfidence = 0;
   let lastHandledDetectionId = 0;
   let reviewUrl;
   let processedReviewUrl;
@@ -89,12 +106,30 @@
   let cameraSessionId = 0;
   let activeDetectorRequestId = 0;
   let reviewGeneration = 0;
+  let reviewRotation = 0;
+  let pageSequence = 0;
+  let processingQueue = [];
+  let processingBusy = false;
+  let processingWorkerReady = false;
+  let activeProcessingJob = null;
+  let sessionGeneration = 1;
+  let reviewPageId = null;
+  let reviewReturnPhase = "scanner";
+  let flaggedReviewIds = [];
+  let finishing = false;
+  let lastCapturedFingerprint = null;
+  let lastCapturedGeometry = null;
+  let replacementDifferenceFrames = 0;
+  let pageAbsentSince = 0;
+  let feedbackTimer;
+  let detectorWorker = null;
+  let processingWorker = null;
+  let detectorWorkerRestarts = 0;
+  let processingWorkerRestarts = 0;
+  let processingReadyTimer;
 
   const processCanvas = document.createElement("canvas");
-  const sourceCanvas = document.createElement("canvas");
-  const outputCanvas = document.createElement("canvas");
   let processContext;
-  const detectorWorker = typeof Worker === "function" ? new Worker("detector-worker.js") : null;
 
   function showToast(message) {
     clearTimeout(toastTimer);
@@ -109,6 +144,7 @@
     elements.scanner.hidden = screen !== "scanner";
     elements.results.hidden = screen !== "results";
     elements.review.hidden = screen !== "review";
+    elements.flagged.hidden = screen !== "flagged";
     elements.reset.hidden = screen === "welcome";
     elements.appHeader.hidden = screen === "scanner";
     document.body.classList.toggle("scanning", screen === "scanner");
@@ -134,6 +170,10 @@
     return documentGroups[documentGroups.length - 1];
   }
 
+  function allPages() { return documentGroups.reduce(function (pages, group) { return pages.concat(group); }, []); }
+  function findPage(pageId) { return allPages().find(function (page) { return page.id === pageId; }); }
+  function makeId() { return self.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2); }
+
   function updateControls() {
     const pages = totalPages();
     const current = currentGroup();
@@ -144,6 +184,25 @@
     elements.finish.disabled = pages === 0;
     elements.finishFiles.hidden = pages === 0;
     renderMenuDocuments();
+    renderFilmstrip();
+  }
+
+  function renderFilmstrip() {
+    const pages = allPages(); elements.filmstrip.replaceChildren();
+    pages.forEach(function (page, index) {
+      const button = document.createElement("button"); button.type = "button"; button.className = "filmstrip-page " + page.status + " " + page.cropStatus; button.dataset.pageId = page.id; button.setAttribute("role", "listitem"); button.setAttribute("aria-label", "Review page " + (index + 1));
+      if (page.thumbnailUrl) { const image = document.createElement("img"); image.src = page.thumbnailUrl; image.alt = ""; button.append(image); }
+      const number = document.createElement("span"); number.className = "page-number"; number.textContent = String(index + 1); button.append(number);
+      if (page.cropStatus !== "accepted" || page.status === "error") { const badge = document.createElement("span"); badge.className = "page-badge"; badge.title = page.cropStatus === "needs-crop" ? "Needs crop" : "Check crop"; button.append(badge); }
+      elements.filmstrip.append(button);
+    });
+    const latest = elements.filmstrip.lastElementChild; if (latest) latest.scrollIntoView({ behavior: "smooth", inline: "end", block: "nearest" });
+  }
+
+  function disposePage(page) {
+    page.revision += 1;
+    if (page.thumbnailUrl) URL.revokeObjectURL(page.thumbnailUrl);
+    page.thumbnailUrl = null; page.originalImage = null; page.processedImage = null; page.thumbnailBlob = null;
   }
 
   function reviewPoints() {
@@ -237,11 +296,17 @@
 
   function resetSession() {
     reviewGeneration += 1;
+    sessionGeneration += 1;
     stopCamera();
+    clearTimeout(processingReadyTimer);
+    if (processingWorker) processingWorker.terminate();
+    processingWorker = null; processingWorkerReady = false; processingBusy = false; activeProcessingJob = null;
+    processingWorkerRestarts = 0; startProcessingWorker();
     if (pendingCapture && pendingCapture.close) pendingCapture.close(); pendingCapture = undefined;
     if (reviewUrl) URL.revokeObjectURL(reviewUrl); reviewUrl = undefined;
     if (processedReviewUrl) URL.revokeObjectURL(processedReviewUrl); processedReviewUrl = undefined;
-    documentGroups = [[]];
+    allPages().forEach(disposePage);
+    documentGroups = [[]]; processingQueue = []; processingBusy = false; pageSequence = 0; reviewPageId = null; flaggedReviewIds = []; finishing = false; lastCapturedFingerprint = null; lastCapturedGeometry = null; replacementDifferenceFrames = 0;
     generatedFiles.forEach(function (file) { URL.revokeObjectURL(file.url); });
     generatedFiles = [];
     stableCorners = [];
@@ -434,6 +499,32 @@
     return movement / ((frames.length - 1) * 4);
   }
 
+  function fingerprintFromFrame(corners) {
+    if (!processContext || !corners) return null;
+    const minX = Math.max(0, Math.min.apply(null, corners.map(function (point) { return point.x; }))); const maxX = Math.min(1, Math.max.apply(null, corners.map(function (point) { return point.x; })));
+    const minY = Math.max(0, Math.min.apply(null, corners.map(function (point) { return point.y; }))); const maxY = Math.min(1, Math.max.apply(null, corners.map(function (point) { return point.y; })));
+    const width = Math.max(2, Math.round((maxX - minX) * processCanvas.width)); const height = Math.max(2, Math.round((maxY - minY) * processCanvas.height));
+    const canvas = document.createElement("canvas"); canvas.width = 9; canvas.height = 8; const context = canvas.getContext("2d", { willReadFrequently: true }); context.drawImage(processCanvas, Math.round(minX * processCanvas.width), Math.round(minY * processCanvas.height), width, height, 0, 0, 9, 8);
+    const data = context.getImageData(0, 0, 9, 8).data; const luma = []; let total = 0;
+    for (let index = 0; index < 72; index += 1) { const value = .299 * data[index * 4] + .587 * data[index * 4 + 1] + .114 * data[index * 4 + 2]; luma.push(value); total += value; }
+    let bits = ""; for (let y = 0; y < 8; y += 1) for (let x = 0; x < 8; x += 1) bits += luma[y * 9 + x] > luma[y * 9 + x + 1] ? "1" : "0";
+    return { bits: bits, mean: total / 72, aspect: width / height };
+  }
+
+  function fingerprintDistance(one, two) {
+    if (!one || !two || Math.abs(one.aspect - two.aspect) / Math.max(one.aspect, two.aspect) > .18 || Math.abs(one.mean - two.mean) > 42) return 64;
+    let difference = 0; for (let index = 0; index < one.bits.length; index += 1) if (one.bits[index] !== two.bits[index]) difference += 1; return difference;
+  }
+
+  function geometryForCorners(corners) {
+    return { centroid: corners.reduce(function (sum, point) { return { x: sum.x + point.x / 4, y: sum.y + point.y / 4 }; }, { x: 0, y: 0 }), area: Math.abs(ScannerGeometry.signedArea(corners)) };
+  }
+
+  function rearmCapture() {
+    requiresPageChange = false; replacementDifferenceFrames = 0; pageAbsentSince = 0; stableCorners = []; readySince = 0; elements.status.textContent = "Hold steady";
+    if (DEBUG_MODE && performance.mark) performance.mark("scanner-rearmed");
+  }
+
   function processFrame() {
     if (appPhase !== "scanner" || !stream || elements.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || isCapturing || detectorBusy) return;
     const videoWidth = elements.video.videoWidth;
@@ -467,6 +558,7 @@
     lastHandledDetectionId = result.id;
     const corners = result.corners;
     const confidence = result.confidence || 0;
+    lastDetectionConfidence = confidence;
     lastDetectorMetrics = result.metrics;
     detectedCorners = corners;
     if (!corners) {
@@ -475,20 +567,29 @@
       drawOutline(pageGuideCorners(), false, true);
       stableCorners = [];
       readySince = 0;
-      if (requiresPageChange && Date.now() - lastPageSeenAt > PAGE_REMOVED_DELAY) {
-        requiresPageChange = false;
-        elements.status.textContent = "Ready for the next page.";
+      if (requiresPageChange) {
+        if (!pageAbsentSince) pageAbsentSince = Date.now();
+        if (Date.now() - pageAbsentSince >= 300) rearmCapture();
+        else elements.status.textContent = "Replace the page";
       } else if (!requiresPageChange) {
         elements.status.textContent = "Finding page edges. Align it to the dashed " + guideLabel() + " guide.";
       }
       return;
     }
+    pageAbsentSince = 0;
     const identityChanged = !displayCorners || Math.hypot(corners.reduce(function (sum, point) { return sum + point.x / 4; }, 0) - displayCorners.reduce(function (sum, point) { return sum + point.x / 4; }, 0), corners.reduce(function (sum, point) { return sum + point.y / 4; }, 0) - displayCorners.reduce(function (sum, point) { return sum + point.y / 4; }, 0)) > .12;
     if (identityChanged) { displayCorners = corners.map(function (point) { return { x: point.x, y: point.y }; }); stableCorners = []; readySince = 0; }
     else displayCorners = corners.map(function (point, index) { return { x: .38 * point.x + .62 * displayCorners[index].x, y: .38 * point.y + .62 * displayCorners[index].y }; });
     currentCorners = corners;
     if (confidence >= .62) lastReliableCorners = corners.map(function (point) { return { x: point.x, y: point.y }; });
     lastPageSeenAt = Date.now();
+    if (requiresPageChange) {
+      const fingerprint = fingerprintFromFrame(corners); const geometry = geometryForCorners(corners); const centroidChange = lastCapturedGeometry ? distance(geometry.centroid, lastCapturedGeometry.centroid) : 0; const areaChange = lastCapturedGeometry ? Math.abs(geometry.area - lastCapturedGeometry.area) / Math.max(geometry.area, lastCapturedGeometry.area) : 0;
+      if (fingerprintDistance(fingerprint, lastCapturedFingerprint) >= REARM_DIFFERENCE || centroidChange >= .08 || areaChange >= .16) replacementDifferenceFrames += 1; else replacementDifferenceFrames = 0;
+      drawOutline(displayCorners, false); elements.status.textContent = "Replace the page";
+      if (replacementDifferenceFrames >= REARM_DIFFERENT_FRAMES) rearmCapture();
+      return;
+    }
     stableCorners.push(displayCorners);
     if (stableCorners.length > AUTO_CAPTURE_STABLE_FRAMES) stableCorners.shift();
     const areas = stableCorners.map(function (points) { return Math.abs(ScannerGeometry.signedArea(points)); });
@@ -501,15 +602,11 @@
       readySince = 0;
     }
     drawOutline(displayCorners, stable && !requiresPageChange);
-    if (requiresPageChange) {
-      elements.status.textContent = "Move the page away, then show the next one.";
-      return;
-    }
     const ready = readySince && Date.now() - readySince >= 900;
     let guidance = confidence < .48 ? "Finding page..." : (lastDetectorMetrics && lastDetectorMetrics.areaRatio < .16 ? "Move closer" : (!lastDetectorMetrics || lastDetectorMetrics.blurScore < 45 ? "Hold steady" : (lastDetectorMetrics.brightness < 45 ? "Too dark" : (lastDetectorMetrics.overexposure > .28 || lastDetectorMetrics.glareRatio > .08 ? "Reduce glare" : "Hold steady"))));
     elements.status.textContent = ready ? "Ready. Capturing..." : guidance;
     if (DEBUG_MODE) elements.status.textContent += " | confidence " + confidence.toFixed(2) + " | blur " + Math.round(lastDetectorMetrics.blurScore) + " | mask " + (result.diagnostics && result.diagnostics.maskUsed);
-    if (ready && elements.autoCapture.checked) { readySince = 0; captureCurrentPage(lastReliableCorners || corners); }
+    if (ready && elements.autoCapture.checked) { readySince = 0; captureCurrentPage(lastReliableCorners || corners, "auto"); }
   }
 
   function distance(one, two) {
@@ -534,15 +631,14 @@
     const track = stream && stream.getVideoTracks()[0];
     if (window.ImageCapture && track) {
       try {
-        const photo = await new ImageCapture(track).takePhoto();
-        return await decodeBlobToSource(photo);
+        return await new ImageCapture(track).takePhoto();
       } catch (error) { /* Use the intrinsic video fallback below. */ }
     }
     const canvas = document.createElement("canvas");
     canvas.width = elements.video.videoWidth;
     canvas.height = elements.video.videoHeight;
     canvas.getContext("2d").drawImage(elements.video, 0, 0, canvas.width, canvas.height);
-    return typeof createImageBitmap === "function" ? createImageBitmap(canvas) : canvas;
+    return canvasToBlob(canvas, "image/jpeg", .95);
   }
 
   async function decodeBlobToSource(blob) {
@@ -557,29 +653,149 @@
     } finally { URL.revokeObjectURL(url); }
   }
 
-  async function captureCurrentPage(corners) {
-    if (isCapturing) return;
+  function qualityWarnings(metrics) {
+    const warnings = [];
+    if (!metrics) return ["No detector metrics"];
+    if (metrics.blurScore < 45) warnings.push("Blurry");
+    if (metrics.brightness < 45) warnings.push("Too dark");
+    if (metrics.overexposure > .28 || metrics.glareRatio > .08) warnings.push("Glare or overexposure");
+    if (metrics.borderMargin < SAFE_BORDER_MARGIN) warnings.push("Page may be clipped");
+    if (metrics.edgeScore < STRONG_EDGE_SUPPORT) warnings.push("Weak page edges");
+    return warnings;
+  }
+
+  function classifyCrop(confidence, corners, metrics, source) {
+    const valid = Boolean(corners && ScannerGeometry.validateQuad(corners)); const safe = metrics && metrics.borderMargin >= SAFE_BORDER_MARGIN; const strongEdges = metrics && metrics.edgeScore >= STRONG_EDGE_SUPPORT;
+    if (confidence >= HIGH_CONFIDENCE && valid && safe && strongEdges) return "accepted";
+    if (valid && confidence >= MEDIUM_CONFIDENCE) return "check";
+    return "needs-crop";
+  }
+
+  function showCaptureFeedback(page) {
+    clearTimeout(feedbackTimer); elements.captureFeedbackText.textContent = "Page " + totalPages() + " captured"; elements.captureFeedback.hidden = false;
+    feedbackTimer = setTimeout(function () { elements.captureFeedback.hidden = true; }, 2800);
+    elements.flash.classList.remove("active"); void elements.flash.offsetWidth; elements.flash.classList.add("active");
+    if (navigator.vibrate) navigator.vibrate(35);
+  }
+
+  async function makeImmediateThumbnail(page, corners) {
+    try {
+      const minX = Math.max(0, Math.min.apply(null, corners.map(function (point) { return point.x; }))); const maxX = Math.min(1, Math.max.apply(null, corners.map(function (point) { return point.x; })));
+      const minY = Math.max(0, Math.min.apply(null, corners.map(function (point) { return point.y; }))); const maxY = Math.min(1, Math.max.apply(null, corners.map(function (point) { return point.y; })));
+      const canvas = document.createElement("canvas"); canvas.width = 128; canvas.height = 160; canvas.getContext("2d").drawImage(processCanvas, minX * processCanvas.width, minY * processCanvas.height, Math.max(2, (maxX - minX) * processCanvas.width), Math.max(2, (maxY - minY) * processCanvas.height), 0, 0, canvas.width, canvas.height);
+      const revision = page.revision; const thumbnailBlob = await canvasToBlob(canvas, "image/jpeg", .72); if (!findPage(page.id) || page.revision !== revision || page.processedImage) return; page.thumbnailBlob = thumbnailBlob; if (page.thumbnailUrl) URL.revokeObjectURL(page.thumbnailUrl); page.thumbnailUrl = URL.createObjectURL(page.thumbnailBlob); renderFilmstrip();
+    } catch (error) { /* Placeholder remains until processing completes. */ }
+  }
+
+  async function captureCurrentPage(corners, source) {
+    if (isCapturing || finishing || totalPages() >= 50) return;
+    if (processingQueue.length >= MAX_PROCESS_QUEUE) { if (source === "manual") showToast("Still processing previous pages."); elements.status.textContent = "Processing previous pages..."; return; }
     isCapturing = true;
     elements.status.textContent = "Capturing high-resolution still...";
-    const generation = reviewGeneration += 1;
+    const started = performance.now(); const generation = sessionGeneration; const targetGroup = currentGroup(); const previewWidth = elements.video.videoWidth; const previewHeight = elements.video.videoHeight;
+    const chosenCorners = corners && ScannerGeometry.validateQuad(corners) ? corners.map(function (point) { return { x: point.x, y: point.y }; }) : pageGuideCorners();
+    const fingerprint = fingerprintFromFrame(chosenCorners); const detectionConfidence = source === "manual" ? lastDetectionConfidence : lastDetectionConfidence; const metrics = lastDetectorMetrics ? Object.assign({}, lastDetectorMetrics) : null; const mode = elements.scanMode.value;
     try {
-      const bitmap = await captureHighResolutionStill();
-      if (generation !== reviewGeneration) { if (bitmap.close) bitmap.close(); return; }
-      pendingCapture = bitmap;
-      const mappedCorners = corners ? mapPreviewCornersToStill(corners, elements.video.videoWidth, elements.video.videoHeight, bitmap.width, bitmap.height) : null;
-      reviewCorners = mappedCorners ? refineCornersOnStill(bitmap, mappedCorners) : [{ x: .05, y: .05 }, { x: .95, y: .05 }, { x: .95, y: .95 }, { x: .05, y: .95 }];
-      initialReviewCorners = reviewCorners.map(function (point) { return { x: point.x, y: point.y }; });
-      elements.reviewMode.value = elements.scanMode.value;
-      if (reviewUrl) URL.revokeObjectURL(reviewUrl);
-      reviewUrl = URL.createObjectURL(await bitmapToBlob(bitmap));
-      elements.reviewImage.src = reviewUrl;
-      if (elements.reviewImage.decode) await elements.reviewImage.decode();
-      else await new Promise(function (resolve, reject) { elements.reviewImage.onload = resolve; elements.reviewImage.onerror = reject; });
-      setScreen("review");
-      drawReview();
+      const originalImage = await captureHighResolutionStill();
+      if (generation !== sessionGeneration) return;
+      if (source === "auto" && fingerprintDistance(fingerprint, lastCapturedFingerprint) <= DUPLICATE_DISTANCE) { showToast("Page already captured"); return; }
+      const duplicateDistance = fingerprintDistance(fingerprint, lastCapturedFingerprint); const warnings = qualityWarnings(metrics); let cropStatus = classifyCrop(detectionConfidence, corners, metrics, source); if (source !== "auto" && duplicateDistance <= DUPLICATE_DISTANCE) { cropStatus = cropStatus === "needs-crop" ? cropStatus : "check"; warnings.push("Possible duplicate page"); }
+      const page = { id: makeId(), revision: 1, sequence: pageSequence += 1, originalImage: originalImage, detectedCorners: chosenCorners, refinedCorners: null, finalCorners: chosenCorners, detectionConfidence: detectionConfidence, refinementConfidence: 0, cropStatus: cropStatus, qualityWarnings: warnings, processedImage: null, processedMimeType: null, processedWidth: 0, processedHeight: 0, rotation: 0, scanMode: mode, status: "captured", fingerprint: fingerprint, previewWidth: previewWidth, previewHeight: previewHeight, sourceWidth: 0, sourceHeight: 0, thumbnailBlob: null, thumbnailUrl: null, processingAttempts: 0, timings: { stillCaptureMs: performance.now() - started }, cancelled: false };
+      page.createdAt = started;
+      targetGroup.push(page); requiresPageChange = true; lastCapturedFingerprint = fingerprint; lastCapturedGeometry = geometryForCorners(chosenCorners); replacementDifferenceFrames = 0; pageAbsentSince = 0; stableCorners = []; readySince = 0;
+      makeImmediateThumbnail(page, chosenCorners); updateControls(); showCaptureFeedback(page); elements.status.textContent = "Replace the page";
+      processingQueue.push({ pageId: page.id, revision: page.revision, generation: sessionGeneration }); pumpProcessingQueue();
+      if (DEBUG_MODE) console.debug("capture admitted", page.id, page.timings);
     } catch (error) {
       showToast("Could not capture the high-resolution image. Try again.");
-    } finally { isCapturing = false; }
+    } finally { isCapturing = false; if (finishing) maybeCompleteFinish(); if (DEBUG_MODE) console.debug("camera rearmed after", Math.round(performance.now() - started), "ms"); }
+  }
+
+  function processingJobMatches(job) {
+    return Boolean(job && activeProcessingJob && job.pageId === activeProcessingJob.pageId && job.revision === activeProcessingJob.revision && job.generation === activeProcessingJob.generation);
+  }
+
+  function releaseProcessingJob(job) {
+    if (!processingJobMatches(job)) return;
+    processingBusy = false; activeProcessingJob = null; pumpProcessingQueue();
+    if (finishing) maybeCompleteFinish();
+  }
+
+  function pumpProcessingQueue() {
+    if (!processingWorker && processingQueue.length) {
+      markProcessingUnavailable();
+      return;
+    }
+    if (processingBusy || !processingWorkerReady || !processingQueue.length) return;
+    const job = processingQueue.shift(); const page = findPage(job.pageId);
+    if (!page || page.cancelled || page.revision !== job.revision || job.generation !== sessionGeneration) { pumpProcessingQueue(); return; }
+    processingBusy = true; page.status = "processing"; page.processingAttempts += 1; renderFilmstrip();
+    activeProcessingJob = job;
+    prepareProcessingJob(page, job).catch(function (error) { handleProcessingFailure(page, job, error); });
+  }
+
+  async function prepareProcessingJob(page, job) {
+    const started = performance.now(); const source = await decodeBlobToSource(page.originalImage);
+    try {
+      if (!findPage(page.id) || page.revision !== job.revision || !processingJobMatches(job)) { releaseProcessingJob(job); return; }
+      page.sourceWidth = source.width; page.sourceHeight = source.height;
+      const corners = page.cornersAreStill ? page.finalCorners : mapPreviewCornersToStill(page.finalCorners, page.previewWidth, page.previewHeight, source.width, source.height);
+      page.finalCorners = corners; page.cornersAreStill = true;
+      const memory = navigator.deviceMemory || 4; const maximumInput = memory <= 2 ? 2400 : 4000; const maximumInputPixels = memory <= 2 ? 5000000 : 12000000; const scale = Math.min(1, maximumInput / Math.max(source.width, source.height), Math.sqrt(maximumInputPixels / (source.width * source.height)));
+      const canvas = document.createElement("canvas"); canvas.width = Math.round(source.width * scale); canvas.height = Math.round(source.height * scale); const context = canvas.getContext("2d", { willReadFrequently: true }); context.drawImage(source, 0, 0, canvas.width, canvas.height); const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+      page.timings.sourcePreservationMs = performance.now() - started;
+      processingWorker.postMessage({ type: "process", pageId: page.id, revision: page.revision, generation: job.generation, width: canvas.width, height: canvas.height, buffer: imageData.data.buffer, corners: corners, rotation: page.rotation || 0, mode: page.scanMode, maximumDimension: memory <= 2 ? 2000 : (memory <= 4 ? 2800 : 3200), maximumPixels: memory <= 2 ? 4000000 : 8000000 }, [imageData.data.buffer]);
+      canvas.width = 0; canvas.height = 0;
+    } finally { if (source.close) source.close(); }
+  }
+
+  async function applyProcessingResult(result) {
+    if (!processingJobMatches(result)) return;
+    const page = findPage(result.pageId);
+    if (!page || page.cancelled || page.revision !== result.revision) { releaseProcessingJob(result); return; }
+    const encodingStarted = performance.now();
+    let failure;
+    try {
+      const canvas = document.createElement("canvas"); canvas.width = result.width; canvas.height = result.height; const context = canvas.getContext("2d"); context.putImageData(new ImageData(new Uint8ClampedArray(result.buffer), result.width, result.height), 0, 0);
+      const processedImage = await canvasToBlob(canvas, result.mimeType, .9);
+      const thumb = document.createElement("canvas"); const scale = Math.min(1, 240 / Math.max(result.width, result.height)); thumb.width = Math.max(1, Math.round(result.width * scale)); thumb.height = Math.max(1, Math.round(result.height * scale)); thumb.getContext("2d").drawImage(canvas, 0, 0, thumb.width, thumb.height); const thumbnailBlob = await canvasToBlob(thumb, "image/jpeg", .76);
+      if (!findPage(page.id) || page.revision !== result.revision || !processingJobMatches(result)) { releaseProcessingJob(result); return; }
+      page.processedImage = processedImage; page.processedMimeType = result.mimeType; page.processedWidth = result.width; page.processedHeight = result.height; page.refinedCorners = result.refinedCorners; page.refinementConfidence = result.refinementConfidence; page.finalCorners = result.refinedCorners; page.thumbnailBlob = thumbnailBlob;
+      if (page.thumbnailUrl) URL.revokeObjectURL(page.thumbnailUrl); page.thumbnailUrl = URL.createObjectURL(thumbnailBlob);
+      if (result.refinementConflict && page.cropStatus === "accepted" && !page.cropManuallyAccepted) { page.cropStatus = "check"; page.qualityWarnings.push("Corner refinement disagreed"); }
+      page.status = "ready"; page.timings = Object.assign(page.timings, result.timings, { encodingMs: performance.now() - encodingStarted, totalReadyMs: performance.now() - (page.createdAt || encodingStarted) });
+      canvas.width = 0; canvas.height = 0; thumb.width = 0; thumb.height = 0; renderFilmstrip(); updateControls();
+      if (DEBUG_MODE) console.debug("page ready", page.id, page.timings);
+    } catch (error) { failure = error; }
+    if (failure) { handleProcessingFailure(page, result, failure); return; }
+    releaseProcessingJob(result);
+  }
+
+  function handleProcessingFailure(page, job, error) {
+    if (!processingJobMatches(job)) return;
+    processingBusy = false;
+    activeProcessingJob = null;
+    if (!page || !findPage(page.id) || page.revision !== job.revision) { pumpProcessingQueue(); return; }
+    if (page.processingAttempts < 2) { page.status = "captured"; processingQueue.unshift(job); }
+    else { page.status = "error"; page.cropStatus = "needs-crop"; page.qualityWarnings.push("Processing failed: " + (error.message || error)); }
+    renderFilmstrip(); pumpProcessingQueue(); if (finishing) maybeCompleteFinish();
+  }
+
+  function markProcessingUnavailable() {
+    const jobs = activeProcessingJob ? [activeProcessingJob].concat(processingQueue) : processingQueue.slice();
+    const pageIds = new Set(jobs.map(function (job) { return job.pageId; }));
+    pageIds.forEach(function (pageId) {
+      const page = findPage(pageId);
+      if (!page) return;
+      page.status = "error";
+      page.cropStatus = "needs-crop";
+      if (!page.qualityWarnings.includes("Background processing is unavailable")) page.qualityWarnings.push("Background processing is unavailable");
+    });
+    processingQueue = [];
+    processingBusy = false;
+    activeProcessingJob = null;
+    renderFilmstrip();
+    if (finishing) maybeCompleteFinish();
   }
 
   function mapPreviewCornersToStill(corners, previewWidth, previewHeight, stillWidth, stillHeight) {
@@ -597,41 +813,31 @@
     });
   }
 
-  function refineCornersOnStill(bitmap, initial) {
-    const canvas = document.createElement("canvas"); const scale = Math.min(1, 1200 / Math.max(bitmap.width, bitmap.height));
-    canvas.width = Math.round(bitmap.width * scale); canvas.height = Math.round(bitmap.height * scale); const context = canvas.getContext("2d", { willReadFrequently: true }); context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data; const gray = new Uint8Array(canvas.width * canvas.height);
-    for (let index = 0; index < gray.length; index += 1) gray[index] = Math.round(.299 * pixels[index * 4] + .587 * pixels[index * 4 + 1] + .114 * pixels[index * 4 + 2]);
-    let originalSupport = 0; let refinedSupport = 0;
-    const lines = initial.map(function (point, side) {
-      const next = initial[(side + 1) % 4]; const ax = point.x * canvas.width; const ay = point.y * canvas.height; const bx = next.x * canvas.width; const by = next.y * canvas.height;
-      const dx = bx - ax; const dy = by - ay; const length = Math.hypot(dx, dy); const nx = -dy / length; const ny = dx / length; const samples = [];
-      for (let step = 2; step <= 18; step += 1) {
-        const t = step / 20; const x = ax + dx * t; const y = ay + dy * t; let bestOffset = 0; let bestGradient = 0;
-        for (let offset = -18; offset <= 18; offset += 2) {
-          const x1 = Math.max(0, Math.min(canvas.width - 1, Math.round(x + nx * (offset - 2)))); const y1 = Math.max(0, Math.min(canvas.height - 1, Math.round(y + ny * (offset - 2))));
-          const x2 = Math.max(0, Math.min(canvas.width - 1, Math.round(x + nx * (offset + 2)))); const y2 = Math.max(0, Math.min(canvas.height - 1, Math.round(y + ny * (offset + 2)))); const gradient = Math.abs(gray[y2 * canvas.width + x2] - gray[y1 * canvas.width + x1]);
-          if (gradient > bestGradient) { bestGradient = gradient; bestOffset = offset; }
-          if (offset === 0) originalSupport += gradient;
-        }
-        refinedSupport += bestGradient;
-        samples.push({ x: x + nx * bestOffset, y: y + ny * bestOffset });
-      }
-      const center = samples.reduce(function (sum, sample) { return { x: sum.x + sample.x / samples.length, y: sum.y + sample.y / samples.length }; }, { x: 0, y: 0 });
-      let xx = 0; let xy = 0; let yy = 0; samples.forEach(function (sample) { const x = sample.x - center.x; const y = sample.y - center.y; xx += x * x; xy += x * y; yy += y * y; });
-      const angle = .5 * Math.atan2(2 * xy, xx - yy); const normal = { x: -Math.sin(angle), y: Math.cos(angle) }; return { a: normal.x, b: normal.y, c: -(normal.x * center.x + normal.y * center.y) };
-    });
-    function intersect(one, two) { const determinant = one.a * two.b - two.a * one.b; if (Math.abs(determinant) < .0001) return null; return { x: (one.b * two.c - two.b * one.c) / determinant / canvas.width, y: (one.c * two.a - two.c * one.a) / determinant / canvas.height }; }
-    const refined = ScannerGeometry.orderCorners([intersect(lines[3], lines[0]), intersect(lines[0], lines[1]), intersect(lines[1], lines[2]), intersect(lines[2], lines[3])].filter(Boolean));
-    if (!refined) return initial;
-    const movement = refined.reduce(function (sum, point, index) { return sum + distance(point, initial[index]); }, 0) / 4;
-    return movement <= .08 && refinedSupport > originalSupport * 1.08 ? refined : initial;
-  }
-
   function bitmapToBlob(bitmap) {
     const canvas = document.createElement("canvas"); canvas.width = bitmap.width; canvas.height = bitmap.height;
     canvas.getContext("2d").drawImage(bitmap, 0, 0);
     return canvasToBlob(canvas, "image/jpeg", .95);
+  }
+
+  async function pdfImageForPage(scan) {
+    if (scan.processedImage) return { blob: scan.processedImage, mimeType: scan.processedMimeType };
+    const source = await decodeBlobToSource(scan.originalImage); const mats = [];
+    try {
+      let corners = scan.finalCorners;
+      if (!scan.cornersAreStill && corners && scan.previewWidth && scan.previewHeight) corners = mapPreviewCornersToStill(corners, scan.previewWidth, scan.previewHeight, source.width, source.height);
+      const rotation = scan.rotation || 0; const oriented = document.createElement("canvas"); oriented.width = rotation % 2 ? source.height : source.width; oriented.height = rotation % 2 ? source.width : source.height; const context = oriented.getContext("2d");
+      if (rotation === 1) { context.translate(oriented.width, 0); context.rotate(Math.PI / 2); }
+      else if (rotation === 2) { context.translate(oriented.width, oriented.height); context.rotate(Math.PI); }
+      else if (rotation === 3) { context.translate(0, oriented.height); context.rotate(-Math.PI / 2); }
+      context.drawImage(source, 0, 0);
+      if (!window.cv || !cv.Mat || !corners || !ScannerGeometry.validateQuad(corners)) return { blob: await canvasToBlob(oriented, "image/jpeg", .92), mimeType: "image/jpeg" };
+      const dimensions = outputDimensions(corners, oriented.width, oriented.height); const sourceMat = cv.imread(oriented); const warped = new cv.Mat(); mats.push(sourceMat, warped); const sourcePoints = [];
+      corners.forEach(function (point) { sourcePoints.push(point.x * oriented.width, point.y * oriented.height); });
+      const sourcePointsMat = cv.matFromArray(4, 1, cv.CV_32FC2, sourcePoints); const destinationMat = cv.matFromArray(4, 1, cv.CV_32FC2, [0,0,dimensions.width-1,0,dimensions.width-1,dimensions.height-1,0,dimensions.height-1]); const transform = cv.getPerspectiveTransform(sourcePointsMat, destinationMat); mats.push(sourcePointsMat, destinationMat, transform);
+      cv.warpPerspective(sourceMat, warped, transform, new cv.Size(dimensions.width, dimensions.height), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
+      const output = document.createElement("canvas"); output.width = dimensions.width; output.height = dimensions.height; cv.imshow(output, warped);
+      return { blob: await canvasToBlob(output, "image/jpeg", .92), mimeType: "image/jpeg" };
+    } finally { mats.reverse().forEach(function (mat) { if (mat) mat.delete(); }); if (source.close) source.close(); }
   }
 
   function processOriginal(warped, mats) { const output = warped.clone(); mats.push(output); return output; }
@@ -669,58 +875,6 @@
     cv.adaptiveThreshold(blurred, output, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, blockSize, 10); return output;
   }
 
-  async function capturePage(corners, bitmap) {
-    if (isCapturing) return;
-    isCapturing = true;
-    elements.status.textContent = "Processing page...";
-    const mats = [];
-    let success = false;
-    try {
-      const videoWidth = bitmap ? bitmap.width : elements.video.videoWidth;
-      const videoHeight = bitmap ? bitmap.height : elements.video.videoHeight;
-      sourceCanvas.width = videoWidth;
-      sourceCanvas.height = videoHeight;
-      sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(bitmap || elements.video, 0, 0, videoWidth, videoHeight);
-      const dimensions = outputDimensions(corners, videoWidth, videoHeight);
-      if (Math.min(dimensions.width, dimensions.height) < 320) throw new Error("The selected crop is too small");
-      const source = cv.imread(sourceCanvas); const warped = new cv.Mat(); mats.push(source, warped);
-      const sourcePoints = [];
-      corners.forEach(function (point) { sourcePoints.push(point.x * videoWidth, point.y * videoHeight); });
-      const sourceMat = cv.matFromArray(4, 1, cv.CV_32FC2, sourcePoints); const destinationMat = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, dimensions.width - 1, 0, dimensions.width - 1, dimensions.height - 1, 0, dimensions.height - 1]); const transform = cv.getPerspectiveTransform(sourceMat, destinationMat); mats.push(sourceMat, destinationMat, transform);
-      cv.warpPerspective(source, warped, transform, new cv.Size(dimensions.width, dimensions.height), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
-      const mode = elements.scanMode.value;
-      const output = mode === "original" ? processOriginal(warped, mats) : (mode === "enhanced-color" ? processEnhancedColor(warped, mats) : (mode === "grayscale" ? processGrayscale(warped, mats) : processBlackAndWhite(warped, mats)));
-      outputCanvas.width = dimensions.width;
-      outputCanvas.height = dimensions.height;
-      cv.imshow(outputCanvas, output);
-      const mimeType = mode === "black-and-white" ? "image/png" : "image/jpeg";
-      const blob = await canvasToBlob(outputCanvas, mimeType, .9);
-      const effectiveDpi = Math.min(dimensions.width / (dimensions.width > dimensions.height ? 14 : 8.5), dimensions.height / (dimensions.width > dimensions.height ? 8.5 : 14));
-      currentGroup().push({ blob: blob, mimeType: mimeType, width: dimensions.width, height: dimensions.height, mode: mode, effectiveDpi: effectiveDpi });
-      requiresPageChange = true;
-      lastPageSeenAt = Date.now();
-      stableCorners = [];
-      elements.flash.classList.remove("active");
-      void elements.flash.offsetWidth;
-      elements.flash.classList.add("active");
-      updateControls();
-      showToast("Page added to Document " + documentGroups.length + ".");
-      success = true;
-      setTimeout(function () {
-        if (requiresPageChange) elements.status.textContent = "Move the page away, then show the next one.";
-      }, PAGE_CHANGE_DELAY);
-    } catch (error) {
-      showToast("Could not process this page. Try the capture button again.");
-      elements.status.textContent = "Ready to try again.";
-    } finally {
-      mats.reverse().forEach(function (mat) { if (mat) mat.delete(); });
-      if (success && bitmap && bitmap.close) bitmap.close();
-      sourceCanvas.width = 1; sourceCanvas.height = 1; outputCanvas.width = 1; outputCanvas.height = 1;
-      isCapturing = false;
-    }
-    return success;
-  }
-
   function reviewPointFromEvent(event) {
     const rect = elements.reviewStage.getBoundingClientRect();
     const imageRect = containedImageRect(rect.width, rect.height, elements.reviewImage.naturalWidth, elements.reviewImage.naturalHeight);
@@ -744,30 +898,74 @@
 
   function endCornerDrag() { activeReviewCorner = -1; }
 
-  async function keepReview() {
-    if (!pendingCapture) return;
+  async function rotateBitmapClockwise(bitmap) {
+    const canvas = document.createElement("canvas"); canvas.width = bitmap.height; canvas.height = bitmap.width; const context = canvas.getContext("2d"); context.translate(canvas.width, 0); context.rotate(Math.PI / 2); context.drawImage(bitmap, 0, 0); if (bitmap.close) bitmap.close(); return typeof createImageBitmap === "function" ? createImageBitmap(canvas) : canvas;
+  }
+
+  async function openPageEditor(pageId, returnPhase) {
+    const page = findPage(pageId); if (!page || !page.originalImage) return;
+    reviewGeneration += 1; const generation = reviewGeneration; reviewPageId = pageId; reviewReturnPhase = returnPhase || "scanner";
+    try {
+      if (pendingCapture && pendingCapture.close) pendingCapture.close(); pendingCapture = undefined;
+      let capture = await decodeBlobToSource(page.originalImage);
+      if (generation !== reviewGeneration || reviewPageId !== pageId) { if (capture.close) capture.close(); return; }
+      reviewRotation = page.rotation || 0;
+      for (let turn = 0; turn < reviewRotation; turn += 1) capture = await rotateBitmapClockwise(capture);
+      if (generation !== reviewGeneration || reviewPageId !== pageId) { if (capture.close) capture.close(); return; }
+      pendingCapture = capture;
+      let editorCorners = page.finalCorners || page.detectedCorners || [{x:.03,y:.03},{x:.97,y:.03},{x:.97,y:.97},{x:.03,y:.97}];
+      if (!page.cornersAreStill && page.previewWidth && page.previewHeight) editorCorners = mapPreviewCornersToStill(editorCorners, page.previewWidth, page.previewHeight, pendingCapture.width, pendingCapture.height);
+      reviewCorners = editorCorners.map(function (point) { return { x: point.x, y: point.y }; }); initialReviewCorners = reviewCorners.map(function (point) { return { x: point.x, y: point.y }; }); elements.reviewMode.value = page.scanMode; elements.reviewTitle.textContent = "Review page " + page.sequence;
+      const displayBlob = reviewRotation ? await bitmapToBlob(pendingCapture) : page.originalImage;
+      if (generation !== reviewGeneration || reviewPageId !== pageId) return;
+      if (reviewUrl) URL.revokeObjectURL(reviewUrl); reviewUrl = URL.createObjectURL(displayBlob); elements.reviewImage.src = reviewUrl;
+      if (elements.reviewImage.decode) await elements.reviewImage.decode(); else await new Promise(function (resolve, reject) { elements.reviewImage.onload = resolve; elements.reviewImage.onerror = reject; });
+      if (generation !== reviewGeneration || reviewPageId !== pageId) return;
+      setScreen("review"); drawReview();
+    } catch (error) { if (generation === reviewGeneration) showToast("Could not open this page for review."); }
+  }
+
+  function cleanupReview() {
     reviewGeneration += 1;
-    const bitmap = pendingCapture;
-    elements.scanMode.value = elements.reviewMode.value;
-    pendingCapture = undefined;
-    const kept = await capturePage(reviewPoints(), bitmap);
-    if (!kept) { pendingCapture = bitmap; return; }
+    if (pendingCapture && pendingCapture.close) pendingCapture.close(); pendingCapture = undefined;
     elements.reviewImage.removeAttribute("src");
     if (reviewUrl) URL.revokeObjectURL(reviewUrl); reviewUrl = undefined;
-    if (processedReviewUrl) URL.revokeObjectURL(processedReviewUrl); processedReviewUrl = undefined; showingProcessedReview = false; elements.reviewCanvas.hidden = false;
-    setScreen(stream ? "scanner" : "welcome");
-    stableCorners = []; readySince = 0; requiresPageChange = true;
+    if (processedReviewUrl) URL.revokeObjectURL(processedReviewUrl); processedReviewUrl = undefined;
+    showingProcessedReview = false; elements.reviewCanvas.hidden = false; elements.compare.textContent = "Preview processed";
+  }
+
+  async function keepReview() {
+    if (!pendingCapture || !reviewPageId) return;
+    reviewGeneration += 1;
+    const page = findPage(reviewPageId); if (!page) return;
+    page.finalCorners = reviewPoints().map(function (point) { return { x: point.x, y: point.y }; }); page.cornersAreStill = true; page.rotation = reviewRotation; page.scanMode = elements.reviewMode.value; page.cropStatus = "accepted"; page.cropManuallyAccepted = true; page.qualityWarnings = []; page.status = "captured"; page.revision += 1; page.processingAttempts = 0; page.processedImage = null;
+    processingQueue = processingQueue.filter(function (job) { return job.pageId !== page.id; }); processingQueue.push({ pageId: page.id, revision: page.revision, generation: sessionGeneration });
+    cleanupReview();
+    renderFilmstrip(); pumpProcessingQueue();
+    const wasFlaggedReview = reviewReturnPhase === "flagged-review"; reviewPageId = null;
+    if (wasFlaggedReview) openNextFlaggedPage(); else setScreen(stream ? "scanner" : "welcome");
+    stableCorners = []; readySince = 0;
   }
 
   function retakeReview() {
     reviewGeneration += 1;
-    if (pendingCapture && pendingCapture.close) pendingCapture.close();
-    pendingCapture = undefined;
-    elements.reviewImage.removeAttribute("src");
-    if (reviewUrl) URL.revokeObjectURL(reviewUrl); reviewUrl = undefined;
-    if (processedReviewUrl) URL.revokeObjectURL(processedReviewUrl); processedReviewUrl = undefined; showingProcessedReview = false; elements.reviewCanvas.hidden = false;
-    setScreen(stream ? "scanner" : "welcome");
+    if (reviewPageId) removePageById(reviewPageId);
+    cleanupReview();
+    reviewPageId = null; finishing = false; if (stream) setScreen("scanner"); else startCamera();
     stableCorners = []; readySince = 0;
+  }
+
+  function deleteReviewedPage() {
+    if (!reviewPageId) return; const returnPhase = reviewReturnPhase; removePageById(reviewPageId); reviewPageId = null; cleanupReview();
+    if (returnPhase === "flagged-review") openNextFlaggedPage(); else setScreen(stream ? "scanner" : "welcome");
+  }
+
+  function removePageById(pageId) {
+    for (let groupIndex = 0; groupIndex < documentGroups.length; groupIndex += 1) {
+      const index = documentGroups[groupIndex].findIndex(function (page) { return page.id === pageId; });
+      if (index >= 0) { const page = documentGroups[groupIndex][index]; page.cancelled = true; disposePage(page); documentGroups[groupIndex].splice(index, 1); processingQueue = processingQueue.filter(function (job) { return job.pageId !== pageId; }); updateControls(); return true; }
+    }
+    return false;
   }
 
   function showOriginalReview() { elements.reviewImage.src = reviewUrl; elements.reviewCanvas.hidden = false; elements.compare.textContent = "Preview processed"; showingProcessedReview = false; }
@@ -798,10 +996,7 @@
   async function rotateReview() {
     if (!pendingCapture) return;
     reviewGeneration += 1;
-    const canvas = document.createElement("canvas"); canvas.width = pendingCapture.height; canvas.height = pendingCapture.width;
-    const context = canvas.getContext("2d"); context.translate(canvas.width, 0); context.rotate(Math.PI / 2); context.drawImage(pendingCapture, 0, 0);
-    if (pendingCapture.close) pendingCapture.close();
-    pendingCapture = typeof createImageBitmap === "function" ? await createImageBitmap(canvas) : canvas;
+    pendingCapture = await rotateBitmapClockwise(pendingCapture); reviewRotation = (reviewRotation + 1) % 4;
     reviewCorners = ScannerGeometry.orderCorners(reviewPoints().map(function (point) { return { x: 1 - point.y, y: point.x }; }));
     initialReviewCorners = ScannerGeometry.orderCorners(initialReviewCorners.map(function (point) { return { x: 1 - point.y, y: point.x }; }));
     if (reviewUrl) URL.revokeObjectURL(reviewUrl); reviewUrl = URL.createObjectURL(await bitmapToBlob(pendingCapture)); elements.reviewImage.src = reviewUrl;
@@ -811,30 +1006,27 @@
   }
 
   function manualCapture() {
-    captureCurrentPage(currentCorners);
+    captureCurrentPage(lastReliableCorners || currentCorners, "manual");
   }
 
   async function openCameraFile(file) {
     if (!file) return;
     try {
-      pendingCapture = await decodeBlobToSource(file);
-      reviewCorners = [{ x: .05, y: .05 }, { x: .95, y: .05 }, { x: .95, y: .95 }, { x: .05, y: .95 }];
-      initialReviewCorners = reviewCorners.map(function (point) { return { x: point.x, y: point.y }; });
-      if (reviewUrl) URL.revokeObjectURL(reviewUrl); reviewUrl = URL.createObjectURL(file); elements.reviewImage.src = reviewUrl;
-      if (elements.reviewImage.decode) await elements.reviewImage.decode();
-      setScreen("review"); drawReview();
+      const corners = [{ x: .03, y: .03 }, { x: .97, y: .03 }, { x: .97, y: .97 }, { x: .03, y: .97 }];
+      const page = { id: makeId(), revision: 1, sequence: pageSequence += 1, createdAt: performance.now(), originalImage: file, detectedCorners: null, refinedCorners: null, finalCorners: corners, cornersAreStill: true, detectionConfidence: 0, refinementConfidence: 0, cropStatus: "needs-crop", qualityWarnings: ["Imported image needs crop review"], processedImage: null, processedMimeType: null, processedWidth: 0, processedHeight: 0, rotation: 0, scanMode: elements.scanMode.value, status: "captured", fingerprint: null, previewWidth: 0, previewHeight: 0, sourceWidth: 0, sourceHeight: 0, thumbnailBlob: null, thumbnailUrl: null, processingAttempts: 0, timings: { stillCaptureMs: 0 }, cancelled: false };
+      currentGroup().push(page); processingQueue.push({ pageId: page.id, revision: page.revision, generation: sessionGeneration }); updateControls(); pumpProcessingQueue(); elements.cameraFileInput.value = "";
     } catch (error) { showToast("Could not open that camera image."); }
   }
 
   function undoPage() {
     for (let index = documentGroups.length - 1; index >= 0; index -= 1) {
       if (documentGroups[index].length) {
-        documentGroups[index].pop();
+        const page = documentGroups[index].pop(); page.cancelled = true; disposePage(page); processingQueue = processingQueue.filter(function (job) { return job.pageId !== page.id; });
         if (documentGroups[index].length === 0 && index === documentGroups.length - 1 && documentGroups.length > 1) documentGroups.pop();
         requiresPageChange = false;
         stableCorners = [];
         updateControls();
-        showToast("Last page removed.");
+        showToast("Last page removed."); elements.captureFeedback.hidden = true;
         return;
       }
     }
@@ -846,6 +1038,38 @@
     updateControls();
     showToast("Document " + documentGroups.length + " starts with the next page.");
   }
+
+  function flaggedPages() {
+    return allPages().filter(function (page) { return page.cropStatus !== "accepted" || page.status === "error"; }).sort(function (one, two) { const rank = { "needs-crop": 0, "check": 1, "accepted": 2 }; return rank[one.cropStatus] - rank[two.cropStatus]; });
+  }
+
+  function renderFlaggedPages() {
+    const pages = flaggedPages(); elements.flaggedList.replaceChildren();
+    pages.forEach(function (page) { const button = document.createElement("button"); button.type = "button"; button.className = "flagged-page"; button.dataset.pageId = page.id; if (page.thumbnailUrl) { const image = document.createElement("img"); image.src = page.thumbnailUrl; image.alt = ""; button.append(image); } const reason = document.createElement("span"); reason.textContent = page.cropStatus === "needs-crop" ? "Needs crop" : "Check crop"; if (page.qualityWarnings.length) reason.textContent += ": " + page.qualityWarnings[0]; button.append(reason); elements.flaggedList.append(button); });
+  }
+
+  function requestFinish() {
+    if (!totalPages()) return; finishing = true; closeMenu(); elements.manualCapture.disabled = true; elements.newDocument.disabled = true; elements.status.textContent = "Finishing page processing..."; maybeCompleteFinish();
+  }
+
+  function maybeCompleteFinish() {
+    if (!finishing || isCapturing || processingBusy || processingQueue.length || allPages().some(function (page) { return page.status === "captured" || page.status === "processing"; })) return;
+    stopCamera();
+    if (flaggedPages().length) { renderFlaggedPages(); setScreen("flagged"); }
+    else generatePdfs();
+  }
+
+  function startFlaggedReview() {
+    flaggedReviewIds = flaggedPages().map(function (page) { return page.id; }); openNextFlaggedPage();
+  }
+
+  function openNextFlaggedPage() {
+    while (flaggedReviewIds.length && !findPage(flaggedReviewIds[0])) flaggedReviewIds.shift();
+    if (!flaggedReviewIds.length) { setScreen("flagged"); maybeCompleteFinish(); return; }
+    const pageId = flaggedReviewIds.shift(); openPageEditor(pageId, "flagged-review");
+  }
+
+  function continueAnyway() { finishing = true; generatePdfs(); }
 
   async function generatePdfs() {
     const groups = documentGroups.filter(function (group) { return group.length; });
@@ -861,9 +1085,9 @@
       for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
         const pdf = await PDFLib.PDFDocument.create();
         for (const scan of groups[groupIndex]) {
-          const bytes = await scan.blob.arrayBuffer();
-          const image = scan.mimeType === "image/png" ? await pdf.embedPng(bytes) : await pdf.embedJpg(bytes);
-          const landscape = scan.width > scan.height; const pageWidth = landscape ? 1008 : 612; const pageHeight = landscape ? 612 : 1008;
+          const source = await pdfImageForPage(scan); const bytes = await source.blob.arrayBuffer();
+          const image = source.mimeType === "image/png" ? await pdf.embedPng(bytes) : await pdf.embedJpg(bytes);
+          const imageWidth = scan.processedWidth || scan.sourceWidth || image.width; const imageHeight = scan.processedHeight || scan.sourceHeight || image.height; const landscape = imageWidth > imageHeight; const pageWidth = landscape ? 1008 : 612; const pageHeight = landscape ? 612 : 1008;
           const page = pdf.addPage([pageWidth, pageHeight]); const scale = Math.min(pageWidth / image.width, pageHeight / image.height); const width = image.width * scale; const height = image.height * scale;
           page.drawImage(image, { x: (pageWidth - width) / 2, y: (pageHeight - height) / 2, width: width, height: height });
         }
@@ -873,7 +1097,7 @@
         generatedFiles.push({
           name: fileName,
           pages: groups[groupIndex].length,
-          modes: groups[groupIndex].map(function (scan) { return scan.mode; }),
+          modes: groups[groupIndex].map(function (scan) { return scan.scanMode; }),
           blob: blob,
           url: URL.createObjectURL(blob)
         });
@@ -884,6 +1108,7 @@
     } catch (error) {
       showToast("Could not create the PDFs. Your pages are still available; try again.");
     } finally {
+      finishing = false;
       elements.finish.textContent = "Finish scans";
       elements.finish.disabled = totalPages() === 0;
     }
@@ -991,8 +1216,8 @@
   elements.manualCapture.addEventListener("click", manualCapture);
   elements.undo.addEventListener("click", undoPage);
   elements.newDocument.addEventListener("click", newDocument);
-  elements.finish.addEventListener("click", generatePdfs);
-  elements.finishFiles.addEventListener("click", generatePdfs);
+  elements.finish.addEventListener("click", requestFinish);
+  elements.finishFiles.addEventListener("click", requestFinish);
   elements.flashButton.addEventListener("click", toggleFlash);
   elements.downloadZip.addEventListener("click", downloadZip);
   elements.switchCamera.addEventListener("click", function () {
@@ -1004,6 +1229,7 @@
   elements.resetCorners.addEventListener("click", resetReviewCorners);
   elements.fullImage.addEventListener("click", useFullImage);
   elements.rotate.addEventListener("click", rotateReview);
+  elements.deletePage.addEventListener("click", deleteReviewedPage);
   elements.compare.addEventListener("click", toggleProcessedReview);
   elements.reviewMode.addEventListener("change", function () {
     if (showingProcessedReview) { showOriginalReview(); drawReview(); }
@@ -1012,6 +1238,11 @@
   elements.reviewCanvas.addEventListener("pointermove", moveCorner);
   elements.reviewCanvas.addEventListener("pointerup", endCornerDrag);
   elements.reviewCanvas.addEventListener("pointercancel", endCornerDrag);
+  elements.filmstrip.addEventListener("click", function (event) { const pageButton = event.target.closest("[data-page-id]"); if (pageButton) openPageEditor(pageButton.dataset.pageId, "scanner"); });
+  elements.captureFeedbackUndo.addEventListener("click", undoPage);
+  elements.flaggedList.addEventListener("click", function (event) { const pageButton = event.target.closest("[data-page-id]"); if (pageButton) openPageEditor(pageButton.dataset.pageId, "flagged-review"); });
+  elements.reviewFlagged.addEventListener("click", startFlaggedReview);
+  elements.continueAnyway.addEventListener("click", continueAnyway);
   window.addEventListener("resize", function () { if (!elements.review.hidden) drawReview(); });
   elements.menuButton.addEventListener("click", openMenu);
   elements.closeMenu.addEventListener("click", closeMenu);
@@ -1024,8 +1255,10 @@
     clearTimeout(detectionTimer);
     if (!document.hidden && appPhase === "scanner" && stream) startDetection();
   });
-  if (detectorWorker) {
-    detectorWorker.onmessage = function (event) {
+  function startDetectorWorker() {
+    if (typeof Worker !== "function") return;
+    const worker = new Worker("detector-worker.js"); detectorWorker = worker;
+    worker.onmessage = function (event) {
       if (event.data.type === "result") handleDetection(event.data);
       if (event.data.type === "error") {
         detectorBusy = false;
@@ -1033,16 +1266,52 @@
         showToast("Detector error: " + event.data.message);
       }
     };
-    detectorWorker.onerror = function () {
+    function handleDetectorCrash() {
+      if (detectorWorker !== worker) return;
+      worker.terminate(); detectorWorker = null; detectorBusy = false;
+      if (detectorWorkerRestarts < 1) {
+        detectorWorkerRestarts += 1; startDetectorWorker();
+        if (appPhase === "scanner" && stream) startDetection();
+        return;
+      }
       detectorBusy = false;
       elements.status.textContent = "Use the capture button if page detection is unavailable.";
       showToast("Automatic detection is unavailable. Manual capture is still ready.");
-    };
-    detectorWorker.onmessageerror = function () {
-      detectorBusy = false;
-      showToast("The camera frame could not be sent to the detector. Try reloading the page.");
-    };
+    }
+    worker.onerror = handleDetectorCrash;
+    worker.onmessageerror = handleDetectorCrash;
   }
+
+  function startProcessingWorker() {
+    if (typeof Worker !== "function") return;
+    const worker = new Worker("processing-worker.js"); processingWorker = worker; processingWorkerReady = false;
+    worker.onmessage = function (event) {
+      if (event.data.type === "ready") { clearTimeout(processingReadyTimer); processingWorkerReady = true; pumpProcessingQueue(); }
+      if (event.data.type === "processed") applyProcessingResult(event.data);
+      if (event.data.type === "error") {
+        const job = processingJobMatches(event.data) ? activeProcessingJob : null; const page = job && findPage(job.pageId);
+        if (job) handleProcessingFailure(page, job, new Error(event.data.message));
+      }
+    };
+    function handleProcessingCrash() {
+      if (processingWorker !== worker) return;
+      clearTimeout(processingReadyTimer); worker.terminate(); processingWorker = null; processingWorkerReady = false;
+      if (processingWorkerRestarts < 1) {
+        processingWorkerRestarts += 1;
+        const job = activeProcessingJob; const page = job && findPage(job.pageId);
+        startProcessingWorker();
+        if (job) handleProcessingFailure(page, job, new Error("Processing worker restarted"));
+        return;
+      }
+      markProcessingUnavailable();
+      showToast("Background processing is unavailable. Original pages can still be exported.");
+    }
+    worker.onerror = handleProcessingCrash;
+    worker.onmessageerror = handleProcessingCrash;
+    processingReadyTimer = setTimeout(handleProcessingCrash, 15000);
+  }
+  startDetectorWorker();
+  startProcessingWorker();
   updateControls();
   setTimeout(startCamera, 0);
 })();
