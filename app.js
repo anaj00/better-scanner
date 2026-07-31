@@ -507,20 +507,20 @@
     const sides = [distance(points[0], points[1]), distance(points[1], points[2]), distance(points[2], points[3]), distance(points[3], points[0])];
     if (Math.min.apply(null, sides) < .16 || Math.max.apply(null, sides) / Math.min.apply(null, sides) > 5) return -Infinity;
     const area = Math.abs(ScannerGeometry.signedArea(points));
-    if (area < .08 || area > .92) return -Infinity;
+    if (area < .07 || area > .96) return -Infinity;
     const center = points.reduce(function (sum, point) { return { x: sum.x + point.x / 4, y: sum.y + point.y / 4 }; }, { x: 0, y: 0 });
-    return area * (1 - Math.min(.38, Math.hypot(center.x - .5, center.y - .5) * .38));
+    return area * (1 - Math.min(.35, Math.hypot(center.x - .5, center.y - .5) * .35));
   }
 
   function bestRectangleFromMask(mask, canvas) {
     const contours = new cv.MatVector(); const hierarchy = new cv.Mat(); const candidates = [];
     try {
-      cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+      cv.findContours(mask, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
       for (let index = 0; index < contours.size(); index += 1) {
         const contour = contours.get(index); let approximation; let box;
         try {
           const contourArea = Math.abs(cv.contourArea(contour));
-          if (contourArea >= canvas.width * canvas.height * .06) {
+          if (contourArea >= canvas.width * canvas.height * .055) {
             const perimeter = cv.arcLength(contour, true);
             approximation = new cv.Mat(); cv.approxPolyDP(contour, approximation, .018 * perimeter, true); let points; let score = -Infinity;
             if (approximation.rows === 4 && cv.isContourConvex(approximation)) { points = normalizedPointsFromMat(approximation, canvas, false); score = rectangleScore(points) + .15; }
