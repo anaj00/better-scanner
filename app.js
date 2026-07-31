@@ -3,7 +3,7 @@
   "use strict";
 
   const PROCESSING_WIDTH = 600;
-  const AUTO_CAPTURE_STABLE_FRAMES = 2;
+  const AUTO_CAPTURE_STABLE_FRAMES = 3;
   const DETECTION_INTERVAL = 100;
   const PAGE_REMOVED_DELAY = 350;
   const PAGE_CHANGE_DELAY = 450;
@@ -27,7 +27,7 @@
     switchCamera: document.querySelector("#switch-camera-button"),
     flashButton: document.querySelector("#flash-button"),
     manualCapture: document.querySelector("#manual-capture-button"),
-    undo: document.querySelector("#undo-button"),
+    undo: document.querySelector("#redo-button"),
     newDocument: document.querySelector("#new-document-button"),
     finish: document.querySelector("#finish-button"),
     documentCount: document.querySelector("#document-count"),
@@ -354,14 +354,20 @@
     return orderCorners(points);
   }
 
-  function rectangleScore(points) {
-    const top = distance(points[0], points[1]);
-    const right = distance(points[1], points[2]);
-    const bottom = distance(points[2], points[3]);
-    const left = distance(points[3], points[0]);
+  function rectangleScore(points, canvas) {
+    const scaledDistance = function (one, two) {
+      return Math.hypot((one.x - two.x) * canvas.width, (one.y - two.y) * canvas.height);
+    };
+    const top = scaledDistance(points[0], points[1]);
+    const right = scaledDistance(points[1], points[2]);
+    const bottom = scaledDistance(points[2], points[3]);
+    const left = scaledDistance(points[3], points[0]);
     const shortestSide = Math.min(top, right, bottom, left);
     const longestSide = Math.max(top, right, bottom, left);
-    if (shortestSide < .16 || longestSide / shortestSide > 5) return -Infinity;
+    if (shortestSide < Math.min(canvas.width, canvas.height) * .25 || longestSide / shortestSide > 2.3) return -Infinity;
+    const pageRatio = Math.min((top + bottom) / 2, (left + right) / 2) / Math.max((top + bottom) / 2, (left + right) / 2);
+    const expectedRatio = 8.5 / 14;
+    if (Math.abs(pageRatio - expectedRatio) > .18) return -Infinity;
     let area = 0;
     let centerX = 0;
     let centerY = 0;
@@ -372,7 +378,7 @@
       centerY += point.y;
     });
     area = Math.abs(area) / 2;
-    if (area < .07 || area > .96) return -Infinity;
+    if (area < .18 || area > .92) return -Infinity;
     const distanceFromCenter = Math.hypot(centerX / 4 - .5, centerY / 4 - .5);
     return area * (1 - Math.min(.35, distanceFromCenter * .35));
   }
@@ -383,11 +389,11 @@
     let best;
     let bestScore = -Infinity;
     try {
-      cv.findContours(mask, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+      cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
       for (let index = 0; index < contours.size(); index += 1) {
         const contour = contours.get(index);
         const contourArea = Math.abs(cv.contourArea(contour));
-        if (contourArea >= canvas.width * canvas.height * .055) {
+        if (contourArea >= canvas.width * canvas.height * .14) {
           const perimeter = cv.arcLength(contour, true);
           const approximation = new cv.Mat();
           cv.approxPolyDP(contour, approximation, .018 * perimeter, true);
@@ -395,18 +401,18 @@
           let score = -Infinity;
           if (approximation.rows === 4 && cv.isContourConvex(approximation)) {
             points = normalizedPointsFromMat(approximation, canvas, false);
-            score = rectangleScore(points) + .15;
+            score = rectangleScore(points, canvas) + .15;
           } else {
             const rotatedRect = cv.minAreaRect(contour);
             const rotatedArea = rotatedRect.size.width * rotatedRect.size.height;
             const rectangularity = rotatedArea ? contourArea / rotatedArea : 0;
-            // A page with one weak or missing edge still produces a 3-6 side contour.
-            // The rotated rectangle supplies the missing corner for a fast, usable crop.
+            // A page with one weak edge can still produce a 3-6 side outer contour.
+            // Inner boxes are rejected by the page-size and Legal-aspect checks above.
             if (approximation.rows >= 3 && approximation.rows <= 6 && rectangularity > .32) {
               const box = cv.boxPoints(rotatedRect);
               points = normalizedPointsFromMat(box, canvas, true);
               box.delete();
-              score = rectangleScore(points) * rectangularity;
+              score = rectangleScore(points, canvas) * rectangularity;
             }
           }
           approximation.delete();
@@ -431,15 +437,14 @@
     const edges = new cv.Mat();
     const connectedEdges = new cv.Mat();
     const threshold = new cv.Mat();
-    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
+    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
     try {
       cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
       cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
 
-      // Canny finds clear page borders. Closing bridges short gaps caused by shadows and glare.
+      // Canny finds clear outer borders. Closing bridges small gaps without merging form fields.
       cv.Canny(blurred, edges, 20, 90);
       cv.morphologyEx(edges, connectedEdges, cv.MORPH_CLOSE, kernel);
-      cv.dilate(connectedEdges, connectedEdges, kernel);
       let rectangle = bestRectangleFromMask(connectedEdges, canvas);
       if (rectangle) return rectangle;
 
@@ -585,8 +590,8 @@
       cv.warpPerspective(source, warped, transform, new cv.Size(dimensions.width, dimensions.height), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
       cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY);
       if (elements.scanMode.value === "black-and-white") {
-        cv.GaussianBlur(gray, denoised, new cv.Size(3, 3), 0);
-        cv.adaptiveThreshold(denoised, blackAndWhite, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 51, 15);
+        cv.GaussianBlur(gray, denoised, new cv.Size(5, 5), 0);
+        cv.threshold(denoised, blackAndWhite, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
         cv.medianBlur(blackAndWhite, cleaned, 3);
       }
       outputCanvas.width = dimensions.width;

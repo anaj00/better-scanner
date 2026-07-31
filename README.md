@@ -20,7 +20,7 @@ Open the URL on an iPhone or Android phone, grant camera access, and use the rea
 4. Tap **Finish scans** to generate one PDF for every document boundary.
 5. Use **Download all (.zip)** to save every PDF in one archive. Use the individual Share/Open actions when PDFs need to be saved separately.
 
-PDF pages are US Legal at an effective 200 DPI. Choose black and white, grayscale, or color before capturing a page. Flash uses the browser torch API where the phone and browser support it; iPhone Safari may not expose that control.
+PDF pages are US Legal at an effective 200 DPI. Text (B&W) is the default; grayscale and color are also available before capturing a page. Flash uses the browser torch API where the phone and browser support it; iPhone Safari may not expose that control.
 
 ## Compatibility
 

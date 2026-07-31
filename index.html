@@ -16,7 +16,7 @@
 
       <section id="welcome-screen" class="welcome-screen">
         <div>
-          <h2>Camera unavailable</h2>
+          <h2>BetterScanner</h2>
           <p>Allow camera access to scan documents.</p>
         </div>
         <button id="start-button" class="primary-button" type="button">Open camera</button>
@@ -39,10 +39,11 @@
         </div>
 
         <div class="camera-actions">
-          <button id="new-document-button" class="camera-action-button" type="button" disabled>New document</button>
+          <button id="redo-button" class="camera-action-button camera-action-undo" type="button" disabled>Undo</button>
           <button id="manual-capture-button" class="capture-button" type="button" aria-label="Capture page">
             <span></span>
           </button>
+          <button id="new-document-button" class="camera-action-button camera-action-new" type="button" disabled>New document</button>
         </div>
 
         <aside id="scanner-menu" class="scanner-menu" hidden aria-label="Scan options">
@@ -60,7 +61,7 @@
             <label class="scan-mode-control" for="scan-mode-select">
               Scan mode
               <select id="scan-mode-select">
-                <option value="black-and-white" selected>Black and white</option>
+                <option value="black-and-white" selected>Text (B&W)</option>
                 <option value="grayscale">Grayscale</option>
                 <option value="color">Color</option>
               </select>
@@ -69,7 +70,6 @@
             <div class="menu-utilities">
               <button id="flash-button" class="utility-button" type="button" disabled>Flash</button>
               <button id="switch-camera-button" class="utility-button" type="button">Flip camera</button>
-              <button id="undo-button" class="utility-button" type="button" disabled>Undo last page</button>
             </div>
 
             <button id="finish-button" class="primary-button" type="button" disabled>Finish scans</button>

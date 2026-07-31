@@ -152,8 +152,6 @@ h2 { margin-bottom: .7rem; font-size: clamp(2rem, 9vw, 2.8rem); line-height: 1.0
 }
 
 .camera-action-button {
-  grid-column: 1;
-  justify-self: start;
   min-height: 2.75rem;
   padding: .6rem .8rem;
   border: 1px solid rgba(255, 255, 255, .55);
@@ -164,6 +162,9 @@ h2 { margin-bottom: .7rem; font-size: clamp(2rem, 9vw, 2.8rem); line-height: 1.0
   font-weight: 700;
   backdrop-filter: blur(8px);
 }
+
+.camera-action-undo { grid-column: 1; justify-self: start; }
+.camera-action-new { grid-column: 3; justify-self: end; }
 
 .capture-button {
   grid-column: 2;
@@ -176,7 +177,7 @@ h2 { margin-bottom: .7rem; font-size: clamp(2rem, 9vw, 2.8rem); line-height: 1.0
   background: transparent;
 }
 
-.capture-button span { display: block; width: 4.35rem; height: 4.35rem; border-radius: 50%; background: #fff; transition: transform .15s ease; }
+.capture-button span { display: block; width: 4.35rem; height: 4.35rem; border-radius: 50%; background: #fff; box-shadow: inset 0 0 0 1px #d8d8d8; transition: transform .15s ease; }
 .capture-button:active span { transform: scale(.88); }
 
 .scanner-menu {
@@ -213,7 +214,7 @@ h2 { margin-bottom: .7rem; font-size: clamp(2rem, 9vw, 2.8rem); line-height: 1.0
 .scan-mode-control { display: flex; align-items: center; justify-content: space-between; min-height: 3rem; padding: 0 .8rem; border: 1px solid #3e4d43; border-radius: .65rem; color: #cbd5cb; font-size: .86rem; }
 .scan-mode-control select { border: 0; background: transparent; color: #f6f8f5; font-size: .86rem; font-weight: 700; }
 
-.menu-utilities { display: grid; grid-template-columns: repeat(3, 1fr); gap: .5rem; }
+.menu-utilities { display: grid; grid-template-columns: repeat(2, 1fr); gap: .5rem; }
 .utility-button { min-height: 2.8rem; padding: .5rem; border: 1px solid #506057; border-radius: .6rem; background: transparent; color: #eff5ef; font-size: .74rem; font-weight: 700; }
 
 .results-screen { display: grid; gap: 1rem; padding-top: 1.5rem; }
