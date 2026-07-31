@@ -55,11 +55,14 @@
   let generatedFiles = [];
   let toastTimer;
   let torchEnabled = false;
+  let detectorBusy = false;
+  let detectorRequestId = 0;
 
   const processCanvas = document.createElement("canvas");
   const sourceCanvas = document.createElement("canvas");
   const outputCanvas = document.createElement("canvas");
   let processContext;
+  const detectorWorker = typeof Worker === "function" ? new Worker("detector-worker.js") : null;
 
   function showToast(message) {
     clearTimeout(toastTimer);
@@ -131,6 +134,7 @@
     }
     elements.video.srcObject = null;
     torchEnabled = false;
+    detectorBusy = false;
     elements.flashButton.disabled = true;
     elements.flashButton.textContent = "Flash";
     closeMenu();
@@ -485,7 +489,7 @@
   }
 
   function processFrame() {
-    if (!opencvReady || !stream || elements.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || isCapturing) return;
+    if (!stream || elements.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || isCapturing || detectorBusy) return;
     const videoWidth = elements.video.videoWidth;
     const videoHeight = elements.video.videoHeight;
     if (!videoWidth || !videoHeight) return;
@@ -498,13 +502,30 @@
       processContext = processCanvas.getContext("2d", { willReadFrequently: true });
     }
     processContext.drawImage(elements.video, 0, 0, processCanvas.width, processCanvas.height);
-    let corners;
-    try {
-      corners = quadrilateralFromCanvas(processCanvas);
-    } catch (error) {
+    if (!detectorWorker) {
       elements.status.textContent = "Use the capture button if page detection is unavailable.";
       return;
     }
+    detectorBusy = true;
+    const frameId = detectorRequestId += 1;
+    const postFrame = function (frame) {
+      detectorWorker.postMessage({ id: frameId, width: processCanvas.width, height: processCanvas.height, ...frame }, frame.bitmap ? [frame.bitmap] : []);
+    };
+    if (typeof createImageBitmap === "function") {
+      createImageBitmap(processCanvas).then(function (bitmap) {
+        postFrame({ bitmap: bitmap });
+      }).catch(function () {
+        const imageData = processContext.getImageData(0, 0, processCanvas.width, processCanvas.height);
+        postFrame({ imageData: imageData });
+      });
+    } else {
+      const imageData = processContext.getImageData(0, 0, processCanvas.width, processCanvas.height);
+      postFrame({ imageData: imageData });
+    }
+  }
+
+  function handleDetection(corners) {
+    detectorBusy = false;
     currentCorners = corners;
     if (!corners) {
       currentCorners = pageGuideCorners();
@@ -816,6 +837,16 @@
   });
   window.addEventListener("beforeunload", stopCamera);
   window.addEventListener("resize", function () { if (stream) resizeOverlay(); });
+  if (detectorWorker) {
+    detectorWorker.onmessage = function (event) {
+      if (event.data.type === "result") handleDetection(event.data.corners);
+    };
+    detectorWorker.onerror = function () {
+      detectorBusy = false;
+      elements.status.textContent = "Use the capture button if page detection is unavailable.";
+      showToast("Automatic detection is unavailable. Manual capture is still ready.");
+    };
+  }
   updateControls();
   setTimeout(startCamera, 0);
 })();
