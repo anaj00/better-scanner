@@ -593,7 +593,9 @@
 
   function outputDimensions(corners, sourceWidth, sourceHeight) {
     const points = corners.map(function (point) { return { x: point.x * sourceWidth, y: point.y * sourceHeight }; });
-    const width = Math.max(distance(points[0], points[1]), distance(points[3], points[2])); const height = Math.max(distance(points[0], points[3]), distance(points[1], points[2])); const scale = Math.min(1, 2200 / Math.max(width, height), Math.sqrt(4000000 / (width * height)));
+    const top = distance(points[0], points[1]); const bottom = distance(points[3], points[2]); const left = distance(points[0], points[3]); const right = distance(points[1], points[2]);
+    const widthCorrection = Math.min(1.3, Math.sqrt(Math.max(left, right) / Math.max(1, Math.min(left, right)))); const heightCorrection = Math.min(1.3, Math.sqrt(Math.max(top, bottom) / Math.max(1, Math.min(top, bottom))));
+    const width = Math.max(top, bottom) * widthCorrection; const height = Math.max(left, right) * heightCorrection; const scale = Math.min(1, 2200 / Math.max(width, height), Math.sqrt(4000000 / (width * height)));
     return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
   }
 
@@ -623,13 +625,18 @@
     if (navigator.vibrate) navigator.vibrate(35);
   }
 
+  function restoreTorchAfterPhoto(track) {
+    if (!torchEnabled || !track || !track.applyConstraints) return;
+    track.applyConstraints({ advanced: [{ torch: true }] }).catch(function () { torchEnabled = false; updateFlashControl(); });
+  }
+
   async function captureSourceFrame(corners) {
     const previewWidth = elements.video.videoWidth; const previewHeight = elements.video.videoHeight; const track = stream && stream.getVideoTracks()[0];
     showShutterFeedback();
     if (!stillImageCapture && window.ImageCapture && track) { try { stillImageCapture = new ImageCapture(track); } catch (error) { stillImageCapture = null; } }
     if (stillImageCapture) {
       try {
-        const blob = await stillImageCapture.takePhoto(); const source = await decodeBlobToSource(blob);
+        const blob = await stillImageCapture.takePhoto(); restoreTorchAfterPhoto(track); const source = await decodeBlobToSource(blob);
         try {
           const mappedCorners = mapPreviewCornersToStill(corners, previewWidth, previewHeight, source.width, source.height); const scale = Math.min(1, 4096 / Math.max(source.width, source.height), Math.sqrt(12000000 / (source.width * source.height)));
           sourceCanvas.width = Math.round(source.width * scale); sourceCanvas.height = Math.round(source.height * scale); sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(source, 0, 0, sourceCanvas.width, sourceCanvas.height);

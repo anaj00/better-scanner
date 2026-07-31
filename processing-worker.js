@@ -23,8 +23,9 @@ function distance(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 
 function outputDimensions(corners, width, height, maximumDimension, maximumPixels) {
   const points = corners.map(function (point) { return { x: point.x * width, y: point.y * height }; });
-  const outputWidth = Math.max(distance(points[0], points[1]), distance(points[3], points[2]));
-  const outputHeight = Math.max(distance(points[0], points[3]), distance(points[1], points[2]));
+  const top = distance(points[0], points[1]); const bottom = distance(points[3], points[2]); const left = distance(points[0], points[3]); const right = distance(points[1], points[2]);
+  const widthCorrection = Math.min(1.3, Math.sqrt(Math.max(left, right) / Math.max(1, Math.min(left, right)))); const heightCorrection = Math.min(1.3, Math.sqrt(Math.max(top, bottom) / Math.max(1, Math.min(top, bottom))));
+  const outputWidth = Math.max(top, bottom) * widthCorrection; const outputHeight = Math.max(left, right) * heightCorrection;
   const scale = Math.min(1, maximumDimension / Math.max(outputWidth, outputHeight), Math.sqrt(maximumPixels / (outputWidth * outputHeight)));
   return { width: Math.max(1, Math.round(outputWidth * scale)), height: Math.max(1, Math.round(outputHeight * scale)) };
 }
