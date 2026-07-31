@@ -20,7 +20,7 @@ Open the URL on an iPhone or Android phone, grant camera access, and use the rea
 4. Tap **Finish scans** to generate one PDF for every document boundary.
 5. Use **Share** to save each PDF to Files, Drive, or another app. **Open** is the fallback for browsers without file sharing.
 
-PDF pages are black and white by default and exported at an effective 200 DPI. The PDF size selector defaults to Auto, which recognizes A4 and US Letter or preserves unusual page proportions.
+PDF pages are black and white by default and exported at an effective 200 DPI. The PDF size selector defaults to US Legal. If notebook edges are obscured, align the page to the dashed Legal guide and use manual capture for an accurate Legal crop.
 
 ## Compatibility
 

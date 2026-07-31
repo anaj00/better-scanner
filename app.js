@@ -195,12 +195,7 @@
     }
   }
 
-  function clearOutline() {
-    const context = elements.outline.getContext("2d");
-    context.clearRect(0, 0, elements.outline.width, elements.outline.height);
-  }
-
-  function drawOutline(corners, ready) {
+  function drawOutline(corners, ready, isGuide) {
     resizeOverlay();
     const context = elements.outline.getContext("2d");
     const width = elements.outline.width;
@@ -222,11 +217,49 @@
     });
     context.closePath();
     context.lineWidth = Math.max(3, width * .007);
-    context.strokeStyle = ready ? "#d9fb70" : "#ffffff";
+    context.strokeStyle = ready ? "#d9fb70" : (isGuide ? "rgba(255, 255, 255, .72)" : "#ffffff");
+    context.setLineDash(isGuide ? [width * .035, width * .025] : []);
     context.shadowColor = "rgba(0, 0, 0, .55)";
     context.shadowBlur = 8;
     context.stroke();
     context.shadowBlur = 0;
+    context.setLineDash([]);
+  }
+
+  function pageGuideCorners() {
+    resizeOverlay();
+    const width = elements.outline.width;
+    const height = elements.outline.height;
+    const videoRatio = elements.video.videoWidth / elements.video.videoHeight;
+    const frameRatio = width / height;
+    const renderedWidth = videoRatio > frameRatio ? height * videoRatio : width;
+    const renderedHeight = videoRatio > frameRatio ? height : width / videoRatio;
+    const offsetX = (width - renderedWidth) / 2;
+    const offsetY = (height - renderedHeight) / 2;
+    const pageRatio = elements.pageSize.value === "a4" ? 210 / 297 : (elements.pageSize.value === "legal" ? 8.5 / 14 : 8.5 / 11);
+    let guideWidth = width * .8;
+    let guideHeight = guideWidth / pageRatio;
+    if (guideHeight > height * .86) {
+      guideHeight = height * .86;
+      guideWidth = guideHeight * pageRatio;
+    }
+    const left = (width - guideWidth) / 2;
+    const top = (height - guideHeight) / 2;
+    const toVideoPoint = function (x, y) {
+      return { x: (x - offsetX) / renderedWidth, y: (y - offsetY) / renderedHeight };
+    };
+    return [
+      toVideoPoint(left, top),
+      toVideoPoint(left + guideWidth, top),
+      toVideoPoint(left + guideWidth, top + guideHeight),
+      toVideoPoint(left, top + guideHeight)
+    ];
+  }
+
+  function guideLabel() {
+    if (elements.pageSize.value === "a4") return "A4";
+    if (elements.pageSize.value === "letter") return "Letter";
+    return "Legal";
   }
 
   function orderCorners(points) {
@@ -280,7 +313,7 @@
     let best;
     let bestScore = -Infinity;
     try {
-      cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+      cv.findContours(mask, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
       for (let index = 0; index < contours.size(); index += 1) {
         const contour = contours.get(index);
         const contourArea = Math.abs(cv.contourArea(contour));
@@ -324,7 +357,6 @@
   function quadrilateralFromCanvas(canvas) {
     const src = cv.imread(canvas);
     const gray = new cv.Mat();
-    const normalized = new cv.Mat();
     const blurred = new cv.Mat();
     const edges = new cv.Mat();
     const connectedEdges = new cv.Mat();
@@ -332,11 +364,10 @@
     const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
     try {
       cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-      cv.equalizeHist(gray, normalized);
-      cv.GaussianBlur(normalized, blurred, new cv.Size(5, 5), 0);
+      cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
 
       // Canny finds clear page borders. Closing bridges short gaps caused by shadows and glare.
-      cv.Canny(blurred, edges, 30, 110);
+      cv.Canny(blurred, edges, 20, 90);
       cv.morphologyEx(edges, connectedEdges, cv.MORPH_CLOSE, kernel);
       cv.dilate(connectedEdges, connectedEdges, kernel);
       let rectangle = bestRectangleFromMask(connectedEdges, canvas);
@@ -346,11 +377,14 @@
       cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
       cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel);
       rectangle = bestRectangleFromMask(threshold, canvas);
-      return rectangle;
+      if (rectangle) return rectangle;
+
+      cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+      cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel);
+      return bestRectangleFromMask(threshold, canvas);
     } finally {
       src.delete();
       gray.delete();
-      normalized.delete();
       blurred.delete();
       edges.delete();
       connectedEdges.delete();
@@ -390,13 +424,14 @@
     }
     currentCorners = corners;
     if (!corners) {
-      clearOutline();
+      currentCorners = pageGuideCorners();
+      drawOutline(currentCorners, false, true);
       stableCorners = [];
       if (requiresPageChange && Date.now() - lastPageSeenAt > PAGE_REMOVED_DELAY) {
         requiresPageChange = false;
         elements.status.textContent = "Ready for the next page.";
       } else if (!requiresPageChange) {
-        elements.status.textContent = "Finding a page...";
+        elements.status.textContent = "Finding page edges. Align it to the dashed " + guideLabel() + " guide.";
       }
       return;
     }
@@ -435,6 +470,7 @@
     let width;
     let height;
     if (paper === "a4") { width = 1654; height = 2339; }
+    else if (paper === "legal") { width = 1700; height = 2800; }
     else if (paper === "letter") { width = 1700; height = 2200; }
     else {
       if (ratio > 1) {
@@ -504,10 +540,8 @@
   }
 
   function manualCapture() {
-    const fallbackCorners = [
-      { x: .06, y: .06 }, { x: .94, y: .06 }, { x: .94, y: .94 }, { x: .06, y: .94 }
-    ];
-    if (!currentCorners) showToast("Using a centered crop. Keep the whole page inside the frame.");
+    const fallbackCorners = pageGuideCorners();
+    if (!currentCorners) showToast("Using the " + guideLabel() + " guide. Keep the page inside its dashed border.");
     capturePage(currentCorners || fallbackCorners);
   }
 
