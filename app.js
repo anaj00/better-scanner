@@ -2,9 +2,9 @@
 (function () {
   "use strict";
 
-  const PROCESSING_WIDTH = 600;
-  const AUTO_CAPTURE_STABLE_FRAMES = 3;
-  const DETECTION_INTERVAL = 100;
+  const PROCESSING_WIDTH = 480;
+  const AUTO_CAPTURE_STABLE_FRAMES = 2;
+  const DETECTION_INTERVAL = 180;
   const PAGE_REMOVED_DELAY = 350;
   const PAGE_CHANGE_DELAY = 450;
   const DPI = 200;
@@ -55,6 +55,8 @@
   let generatedFiles = [];
   let toastTimer;
   let torchEnabled = false;
+  let detectionAttempts = 0;
+  let fallbackDetectionActive = false;
 
   const processCanvas = document.createElement("canvas");
   const sourceCanvas = document.createElement("canvas");
@@ -130,6 +132,8 @@
     }
     elements.video.srcObject = null;
     torchEnabled = false;
+    detectionAttempts = 0;
+    fallbackDetectionActive = false;
     elements.flashButton.disabled = true;
     elements.flashButton.textContent = "Flash";
     closeMenu();
@@ -430,7 +434,7 @@
     }
   }
 
-  function quadrilateralFromCanvas(canvas) {
+  function quadrilateralFromCanvas(canvas, useFallback) {
     const src = cv.imread(canvas);
     const gray = new cv.Mat();
     const blurred = new cv.Mat();
@@ -446,16 +450,18 @@
       cv.Canny(blurred, edges, 20, 90);
       cv.morphologyEx(edges, connectedEdges, cv.MORPH_CLOSE, kernel);
       let rectangle = bestRectangleFromMask(connectedEdges, canvas, cv.RETR_EXTERNAL, .1);
-      if (!rectangle) rectangle = bestRectangleFromMask(connectedEdges, canvas, cv.RETR_LIST, .18);
       if (rectangle) return rectangle;
 
       // A light page on a darker table often has no continuous Canny border.
       cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
       cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel);
       rectangle = bestRectangleFromMask(threshold, canvas, cv.RETR_EXTERNAL, .1);
-      if (!rectangle) rectangle = bestRectangleFromMask(threshold, canvas, cv.RETR_LIST, .18);
       if (rectangle) return rectangle;
 
+      if (!useFallback) return undefined;
+
+      rectangle = bestRectangleFromMask(connectedEdges, canvas, cv.RETR_LIST, .18);
+      if (rectangle) return rectangle;
       cv.threshold(blurred, threshold, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
       cv.morphologyEx(threshold, threshold, cv.MORPH_CLOSE, kernel);
       rectangle = bestRectangleFromMask(threshold, canvas, cv.RETR_EXTERNAL, .1);
@@ -495,7 +501,10 @@
     processCanvas.getContext("2d", { willReadFrequently: true }).drawImage(elements.video, 0, 0, processCanvas.width, processCanvas.height);
     let corners;
     try {
-      corners = quadrilateralFromCanvas(processCanvas);
+      detectionAttempts += 1;
+      const useFallback = fallbackDetectionActive || detectionAttempts % 3 === 0;
+      corners = quadrilateralFromCanvas(processCanvas, useFallback);
+      if (useFallback) fallbackDetectionActive = Boolean(corners);
     } catch (error) {
       elements.status.textContent = "Use the capture button if page detection is unavailable.";
       return;
