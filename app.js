@@ -8,6 +8,7 @@
   const PAGE_REMOVED_DELAY = 650;
   const PAGE_CHANGE_DELAY = 900;
   const CAMERA_FOCUS_SETTLE_MS = 700;
+  const PAGE_FOCUS_SETTLE_MS = 350;
 
   const elements = {
     appHeader: document.querySelector("#app-header"),
@@ -75,6 +76,7 @@
   let requiresPageChange = false;
   let lastPageSeenAt = 0;
   let stableCorners = [];
+  let stableSince = 0;
   let currentCorners;
   let documentGroups = [[]];
   let generatedFiles = [];
@@ -243,7 +245,7 @@
     torchEnabled = false;
     stillImageCapture = null;
     cameraReadyAt = 0;
-    stableCorners = [];
+    stableCorners = []; stableSince = 0;
     currentCorners = undefined;
     requiresPageChange = false;
     elements.flashButton.disabled = true;
@@ -289,7 +291,7 @@
     documentGroups = [[]]; processingQueue = []; processingBusy = false; pageSequence = 0; reviewPageId = null; flaggedReviewIds = []; finishing = false;
     generatedFiles.forEach(function (file) { URL.revokeObjectURL(file.url); });
     generatedFiles = [];
-    stableCorners = [];
+    stableCorners = []; stableSince = 0;
     currentCorners = undefined;
     requiresPageChange = false;
     updateControls();
@@ -562,6 +564,7 @@
       currentCorners = pageGuideCorners();
       drawOutline(pageGuideCorners(), false, true);
       stableCorners = [];
+      stableSince = 0;
       if (requiresPageChange && Date.now() - lastPageSeenAt > PAGE_REMOVED_DELAY) { requiresPageChange = false; elements.manualCapture.disabled = false; elements.status.textContent = "Ready for the next page."; }
       else if (!requiresPageChange) {
         elements.status.textContent = "Finding page edges. Align it to the dashed " + guideLabel() + " guide.";
@@ -570,15 +573,17 @@
     }
     lastPageSeenAt = Date.now();
     if (requiresPageChange) {
-      elements.manualCapture.disabled = true; drawOutline(corners, false); elements.status.textContent = "Move the page away, then show the next one.";
+      stableSince = 0; elements.manualCapture.disabled = true; drawOutline(corners, false); elements.status.textContent = "Move the page away, then show the next one.";
       return;
     }
     stableCorners.push(corners);
     if (stableCorners.length > AUTO_CAPTURE_STABLE_FRAMES) stableCorners.shift();
-    const stable = stableCorners.length === AUTO_CAPTURE_STABLE_FRAMES && averageCornerMovement(stableCorners) < .008; const focusReady = performance.now() >= cameraReadyAt;
-    drawOutline(corners, stable && focusReady);
-    elements.status.textContent = !focusReady ? "Focusing camera..." : stable ? (elements.autoCapture.checked ? "Page ready. Capturing..." : "Page ready. Tap capture.") : "Hold steady to scan automatically...";
-    if (stable && focusReady && elements.autoCapture.checked) captureCurrentPage(corners, "auto");
+    const stable = stableCorners.length === AUTO_CAPTURE_STABLE_FRAMES && averageCornerMovement(stableCorners) < .008; const cameraFocused = performance.now() >= cameraReadyAt;
+    if (stable && !stableSince) stableSince = performance.now(); else if (!stable) stableSince = 0;
+    const pageFocused = stable && performance.now() - stableSince >= PAGE_FOCUS_SETTLE_MS; const captureReady = cameraFocused && pageFocused;
+    drawOutline(corners, captureReady);
+    elements.status.textContent = !cameraFocused ? "Focusing camera..." : stable && !pageFocused ? "Focusing page..." : captureReady ? (elements.autoCapture.checked ? "Page ready. Capturing..." : "Page ready. Tap capture.") : "Hold steady to scan automatically...";
+    if (captureReady && elements.autoCapture.checked) captureCurrentPage(corners, "auto");
   }
 
   function distance(one, two) {
@@ -587,7 +592,7 @@
 
   function outputDimensions(corners, sourceWidth, sourceHeight) {
     const points = corners.map(function (point) { return { x: point.x * sourceWidth, y: point.y * sourceHeight }; });
-    const width = Math.max(distance(points[0], points[1]), distance(points[3], points[2])); const height = Math.max(distance(points[0], points[3]), distance(points[1], points[2])); const scale = Math.min(1, 3200 / Math.max(width, height), Math.sqrt(8000000 / (width * height)));
+    const width = Math.max(distance(points[0], points[1]), distance(points[3], points[2])); const height = Math.max(distance(points[0], points[3]), distance(points[1], points[2])); const scale = Math.min(1, 2400 / Math.max(width, height), Math.sqrt(5000000 / (width * height)));
     return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
   }
 
@@ -648,7 +653,7 @@
       const sourceMat = cv.matFromArray(4, 1, cv.CV_32FC2, sourcePoints); const destinationMat = cv.matFromArray(4, 1, cv.CV_32FC2, [0,0,dimensions.width-1,0,dimensions.width-1,dimensions.height-1,0,dimensions.height-1]); const transform = cv.getPerspectiveTransform(sourceMat, destinationMat); mats.push(sourceMat, destinationMat, transform);
       cv.warpPerspective(input, warped, transform, new cv.Size(dimensions.width, dimensions.height), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
       const originalCanvas = document.createElement("canvas"); originalCanvas.width = dimensions.width; originalCanvas.height = dimensions.height; cv.imshow(originalCanvas, warped); const originalBlob = await canvasToBlob(originalCanvas, "image/jpeg", .95);
-      const mode = elements.scanMode.value; const mimeType = mode === "black-and-white" ? "image/png" : "image/jpeg"; let blob;
+      const mode = elements.scanMode.value; const mimeType = "image/jpeg"; let blob;
       outputCanvas.width = dimensions.width; outputCanvas.height = dimensions.height;
       if (mode === "original") { outputCanvas.getContext("2d").drawImage(originalCanvas, 0, 0); blob = originalBlob; }
       else { const output = mode === "grayscale" ? processGrayscale(warped, mats) : processBlackAndWhite(warped, mats); cv.imshow(outputCanvas, output); blob = await canvasToBlob(outputCanvas, mimeType, .9); }
@@ -657,7 +662,7 @@
       if (captureSessionId !== cameraSessionId) return;
       const fullImage = [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}];
       const page = { id: makeId(), revision: 1, sequence: pageSequence += 1, createdAt: started, originalImage: originalBlob, detectedCorners: fullImage, refinedCorners: fullImage, finalCorners: fullImage, cornersAreStill: true, detectionConfidence: 1, refinementConfidence: 1, cropStatus: "accepted", qualityWarnings: [], processedImage: blob, processedMimeType: mimeType, processedWidth: dimensions.width, processedHeight: dimensions.height, rotation: 0, scanMode: mode, status: "ready", previewWidth: dimensions.width, previewHeight: dimensions.height, sourceWidth: dimensions.width, sourceHeight: dimensions.height, thumbnailBlob: thumbnailBlob, thumbnailUrl: URL.createObjectURL(thumbnailBlob), processingAttempts: 0, timings: { totalReadyMs: performance.now() - started }, cancelled: false };
-      targetGroup.push(page); requiresPageChange = true; lastPageSeenAt = Date.now(); stableCorners = [];
+      targetGroup.push(page); requiresPageChange = true; lastPageSeenAt = Date.now(); stableCorners = []; stableSince = 0;
       elements.manualCapture.disabled = true; updateControls(); showCaptureFeedback(page); elements.status.textContent = "Move the page away, then show the next one.";
       setTimeout(function () { if (requiresPageChange) elements.status.textContent = "Move the page away, then show the next one."; }, PAGE_CHANGE_DELAY);
     } catch (error) {
@@ -803,7 +808,7 @@
 
   function processBlackAndWhite(warped, mats) {
     const gray = new cv.Mat(); const background = new cv.Mat(); const normalized = new cv.Mat(); const denoised = new cv.Mat(); const binary = new cv.Mat(); const output = new cv.Mat(); mats.push(gray, background, normalized, denoised, binary, output);
-    cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); cv.GaussianBlur(gray, background, new cv.Size(0, 0), Math.max(18, Math.round(Math.max(warped.rows, warped.cols) / 35))); cv.divide(gray, background, normalized, 250); cv.medianBlur(normalized, denoised, 3);
+    const backgroundSize = Math.max(31, Math.min(81, Math.round(Math.min(warped.rows, warped.cols) / 24) | 1)); cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); cv.blur(gray, background, new cv.Size(backgroundSize, backgroundSize)); cv.divide(gray, background, normalized, 250); cv.medianBlur(normalized, denoised, 3);
     let blockSize = Math.round(Math.min(warped.rows, warped.cols) / 18) | 1; blockSize = Math.max(61, Math.min(121, blockSize)); cv.adaptiveThreshold(denoised, binary, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, blockSize, 15); cv.addWeighted(denoised, .25, binary, .75, 0, output); return output;
   }
 
@@ -877,7 +882,7 @@
     renderFilmstrip(); pumpProcessingQueue();
     const wasFlaggedReview = reviewReturnPhase === "flagged-review"; reviewPageId = null;
     if (wasFlaggedReview) openNextFlaggedPage(); else setScreen(stream ? "scanner" : "welcome");
-    stableCorners = [];
+    stableCorners = []; stableSince = 0;
   }
 
   function retakeReview() {
@@ -885,7 +890,7 @@
     if (reviewPageId) removePageById(reviewPageId);
     cleanupReview();
     reviewPageId = null; finishing = false; requiresPageChange = false; if (stream) { elements.manualCapture.disabled = false; setScreen("scanner"); } else startCamera();
-    stableCorners = [];
+    stableCorners = []; stableSince = 0;
   }
 
   function deleteReviewedPage() {
@@ -919,7 +924,7 @@
       cv.warpPerspective(source, warped, transform, new cv.Size(dimensions.width, dimensions.height), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
       const mode = elements.reviewMode.value; const output = mode === "original" ? processOriginal(warped, mats) : mode === "grayscale" ? processGrayscale(warped, mats) : processBlackAndWhite(warped, mats);
       previewOutput.width = dimensions.width; previewOutput.height = dimensions.height; cv.imshow(previewOutput, output);
-      const blob = await canvasToBlob(previewOutput, mode === "black-and-white" ? "image/png" : "image/jpeg", .88);
+      const blob = await canvasToBlob(previewOutput, "image/jpeg", .88);
       if (generation !== reviewGeneration) return;
       if (processedReviewUrl) URL.revokeObjectURL(processedReviewUrl); processedReviewUrl = URL.createObjectURL(blob); elements.reviewImage.src = processedReviewUrl; elements.reviewCanvas.hidden = true; elements.compare.textContent = "View original"; showingProcessedReview = true;
     } catch (error) { showToast("Could not build the processed preview."); }
@@ -961,7 +966,7 @@
         if (documentGroups[index].length === 0 && index === documentGroups.length - 1 && documentGroups.length > 1) documentGroups.pop();
         requiresPageChange = false;
         if (stream) elements.manualCapture.disabled = false;
-        stableCorners = [];
+        stableCorners = []; stableSince = 0;
         updateControls();
         showToast("Last page removed."); elements.captureFeedback.hidden = true;
         return;
