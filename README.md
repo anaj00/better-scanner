@@ -10,7 +10,7 @@ Client-only mobile document scanner using browser camera APIs, OpenCV.js, pdf-li
 4. Auto-capture requires three detected frames with average corner movement below `0.008`.
 5. Capture immediately perspective-corrects the intrinsic video frame while preserving the detected rectangle's natural aspect ratio and review image.
 6. The camera rearms after the page has been absent for 650ms. Users can continue scanning into the current filmstrip or start another document.
-7. Original mode exports the exact preserved review image. Enhanced color, grayscale, and denoised text modes are optional transformations. `processing-worker.js` is reserved for imported images and explicit filmstrip edits.
+7. Original mode exports the exact preserved review image. Grayscale preserves natural luminance, while B&W applies only mild denoising and contrast. `processing-worker.js` is reserved for imported images and explicit filmstrip edits.
 8. Every scan is centered and aspect-fitted without stretching onto a US Legal PDF page. PDFs can be shared separately or bundled into a ZIP.
 
 ## Run

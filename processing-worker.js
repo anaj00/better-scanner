@@ -57,25 +57,11 @@ function refineCorners(gray, corners) {
   return { corners: accepted ? refined : corners, confidence: accepted ? Math.min(1, (improvement - 1) * 2 + .55) : .2, conflict: movement > .08 };
 }
 
-function applyLocalContrast(source, destination, clipLimit) {
-  let clahe;
-  try { clahe = cv.createCLAHE(clipLimit, new cv.Size(8, 8)); clahe.apply(source, destination); }
-  catch (error) { cv.equalizeHist(source, destination); }
-  finally { if (clahe) clahe.delete(); }
-}
-
 function processMode(warped, mode, mats) {
   if (mode === "original") { const output = warped.clone(); mats.push(output); return output; }
-  if (mode === "enhanced-color") {
-    const rgb = new cv.Mat(); const lab = new cv.Mat(); const outputRgb = new cv.Mat(); const output = new cv.Mat(); const channels = new cv.MatVector(); mats.push(rgb, lab, outputRgb, output, channels);
-    cv.cvtColor(warped, rgb, cv.COLOR_RGBA2RGB); cv.cvtColor(rgb, lab, cv.COLOR_RGB2Lab); cv.split(lab, channels);
-    const luminance = channels.get(0); const channelA = channels.get(1); const channelB = channels.get(2); const background = new cv.Mat(); const normalized = new cv.Mat(); const enhancedL = new cv.Mat(); const merged = new cv.MatVector(); mats.push(luminance, channelA, channelB, background, normalized, enhancedL, merged);
-    cv.GaussianBlur(luminance, background, new cv.Size(0, 0), Math.max(12, Math.round(Math.max(warped.rows, warped.cols) / 45))); cv.divide(luminance, background, normalized, 210); applyLocalContrast(normalized, enhancedL, 1.6);
-    merged.push_back(enhancedL); merged.push_back(channelA); merged.push_back(channelB); cv.merge(merged, lab); cv.cvtColor(lab, outputRgb, cv.COLOR_Lab2RGB); cv.cvtColor(outputRgb, output, cv.COLOR_RGB2RGBA); return output;
-  }
-  const gray = new cv.Mat(); const background = new cv.Mat(); const normalized = new cv.Mat(); mats.push(gray, background, normalized); cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); cv.GaussianBlur(gray, background, new cv.Size(0, 0), Math.max(12, Math.round(Math.max(warped.rows, warped.cols) / 45))); cv.divide(gray, background, normalized, mode === "grayscale" ? 215 : 220);
-  if (mode === "grayscale") { const output = new cv.Mat(); mats.push(output); applyLocalContrast(normalized, output, 1.5); return output; }
-  const blurred = new cv.Mat(); const denoised = new cv.Mat(); const output = new cv.Mat(); mats.push(blurred, denoised, output); cv.GaussianBlur(normalized, blurred, new cv.Size(3, 3), 0); cv.medianBlur(blurred, denoised, 3); let blockSize = Math.round(Math.min(warped.rows, warped.cols) / 22) | 1; blockSize = Math.max(51, Math.min(101, blockSize)); cv.adaptiveThreshold(denoised, output, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, blockSize, 13); return output;
+  const gray = new cv.Mat(); mats.push(gray); cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY);
+  if (mode === "grayscale") return gray;
+  const denoised = new cv.Mat(); const output = new cv.Mat(); mats.push(denoised, output); cv.medianBlur(gray, denoised, 3); denoised.convertTo(output, -1, 1.08, -6); return output;
 }
 
 function processJob(job) {

@@ -618,7 +618,7 @@
       const mode = elements.scanMode.value; const mimeType = mode === "black-and-white" ? "image/png" : "image/jpeg"; let blob;
       outputCanvas.width = dimensions.width; outputCanvas.height = dimensions.height;
       if (mode === "original") { outputCanvas.getContext("2d").drawImage(originalCanvas, 0, 0); blob = originalBlob; }
-      else { const output = mode === "enhanced-color" ? processEnhancedColor(warped, mats) : mode === "grayscale" ? processGrayscale(warped, mats) : processBlackAndWhite(warped, mats); cv.imshow(outputCanvas, output); blob = await canvasToBlob(outputCanvas, mimeType, .9); }
+      else { const output = mode === "grayscale" ? processGrayscale(warped, mats) : processBlackAndWhite(warped, mats); cv.imshow(outputCanvas, output); blob = await canvasToBlob(outputCanvas, mimeType, .9); }
       if (captureSessionId !== cameraSessionId) return;
       const thumbnailCanvas = document.createElement("canvas"); const thumbnailScale = 200 / Math.max(dimensions.width, dimensions.height); thumbnailCanvas.width = Math.round(dimensions.width * thumbnailScale); thumbnailCanvas.height = Math.round(dimensions.height * thumbnailScale); thumbnailCanvas.getContext("2d").drawImage(outputCanvas, 0, 0, thumbnailCanvas.width, thumbnailCanvas.height); const thumbnailBlob = await canvasToBlob(thumbnailCanvas, "image/jpeg", .72);
       if (captureSessionId !== cameraSessionId) return;
@@ -764,37 +764,13 @@
 
   function processOriginal(warped, mats) { const output = warped.clone(); mats.push(output); return output; }
 
-  function applyLocalContrast(source, destination, clipLimit) {
-    let clahe;
-    try { clahe = cv.createCLAHE(clipLimit, new cv.Size(8, 8)); clahe.apply(source, destination); }
-    catch (error) { cv.equalizeHist(source, destination); }
-    finally { if (clahe) clahe.delete(); }
-  }
-
-  function processEnhancedColor(warped, mats) {
-    const rgb = new cv.Mat(); const lab = new cv.Mat(); const outputRgb = new cv.Mat(); const output = new cv.Mat(); const channels = new cv.MatVector();
-    mats.push(rgb, lab, outputRgb, output, channels);
-    cv.cvtColor(warped, rgb, cv.COLOR_RGBA2RGB); cv.cvtColor(rgb, lab, cv.COLOR_RGB2Lab); cv.split(lab, channels);
-    const luminance = channels.get(0); const background = new cv.Mat(); const normalized = new cv.Mat(); const enhancedL = new cv.Mat(); mats.push(luminance, background, normalized, enhancedL);
-    cv.GaussianBlur(luminance, background, new cv.Size(0, 0), Math.max(12, Math.round(Math.max(warped.rows, warped.cols) / 45)));
-    cv.divide(luminance, background, normalized, 210);
-    applyLocalContrast(normalized, enhancedL, 1.6);
-    const channelA = channels.get(1); const channelB = channels.get(2); const merged = new cv.MatVector(); mats.push(channelA, channelB, merged); merged.push_back(enhancedL); merged.push_back(channelA); merged.push_back(channelB);
-    cv.merge(merged, lab); cv.cvtColor(lab, outputRgb, cv.COLOR_Lab2RGB); cv.cvtColor(outputRgb, output, cv.COLOR_RGB2RGBA);
-    return output;
-  }
-
   function processGrayscale(warped, mats) {
-    const gray = new cv.Mat(); const background = new cv.Mat(); const normalized = new cv.Mat(); const output = new cv.Mat(); mats.push(gray, background, normalized, output);
-    cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); cv.GaussianBlur(gray, background, new cv.Size(0, 0), Math.max(12, Math.round(Math.max(warped.rows, warped.cols) / 45))); cv.divide(gray, background, normalized, 215);
-    applyLocalContrast(normalized, output, 1.5); return output;
+    const gray = new cv.Mat(); mats.push(gray); cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); return gray;
   }
 
   function processBlackAndWhite(warped, mats) {
-    const gray = new cv.Mat(); const background = new cv.Mat(); const normalized = new cv.Mat(); const blurred = new cv.Mat(); const denoised = new cv.Mat(); const output = new cv.Mat(); mats.push(gray, background, normalized, blurred, denoised, output);
-    cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); cv.GaussianBlur(gray, background, new cv.Size(0, 0), Math.max(12, Math.round(Math.max(warped.rows, warped.cols) / 45))); cv.divide(gray, background, normalized, 220); cv.GaussianBlur(normalized, blurred, new cv.Size(3, 3), 0); cv.medianBlur(blurred, denoised, 3);
-    let blockSize = Math.round(Math.min(warped.rows, warped.cols) / 22) | 1; blockSize = Math.max(51, Math.min(101, blockSize));
-    cv.adaptiveThreshold(denoised, output, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, blockSize, 13); return output;
+    const gray = new cv.Mat(); const denoised = new cv.Mat(); const output = new cv.Mat(); mats.push(gray, denoised, output);
+    cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); cv.medianBlur(gray, denoised, 3); denoised.convertTo(output, -1, 1.08, -6); return output;
   }
 
   function reviewPointFromEvent(event) {
@@ -907,7 +883,7 @@
       const sourcePoints = []; reviewPoints().forEach(function (point) { sourcePoints.push(point.x * previewSource.width, point.y * previewSource.height); });
       const sourceMat = cv.matFromArray(4, 1, cv.CV_32FC2, sourcePoints); const destinationMat = cv.matFromArray(4, 1, cv.CV_32FC2, [0,0,dimensions.width-1,0,dimensions.width-1,dimensions.height-1,0,dimensions.height-1]); const transform = cv.getPerspectiveTransform(sourceMat, destinationMat); mats.push(sourceMat, destinationMat, transform);
       cv.warpPerspective(source, warped, transform, new cv.Size(dimensions.width, dimensions.height), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
-      const mode = elements.reviewMode.value; const output = mode === "original" ? processOriginal(warped, mats) : mode === "enhanced-color" ? processEnhancedColor(warped, mats) : mode === "grayscale" ? processGrayscale(warped, mats) : processBlackAndWhite(warped, mats);
+      const mode = elements.reviewMode.value; const output = mode === "original" ? processOriginal(warped, mats) : mode === "grayscale" ? processGrayscale(warped, mats) : processBlackAndWhite(warped, mats);
       previewOutput.width = dimensions.width; previewOutput.height = dimensions.height; cv.imshow(previewOutput, output);
       const blob = await canvasToBlob(previewOutput, mode === "black-and-white" ? "image/png" : "image/jpeg", .88);
       if (generation !== reviewGeneration) return;
