@@ -515,7 +515,9 @@
   function moveGuideCorner(event) {
     if (activeGuideCorner < 0 || !customGuideCorners) return;
     var candidate = customGuideCorners.map(function (point) { return { x: point.x, y: point.y }; });
-    candidate[activeGuideCorner] = guidePointFromEvent(event);
+    var pt = guidePointFromEvent(event);
+    pt.y = Math.min(pt.y, .86);
+    candidate[activeGuideCorner] = pt;
     if (ScannerGeometry.validateQuad(candidate)) customGuideCorners = candidate;
     drawGuide();
   }
@@ -535,12 +537,12 @@
     const pageRatio = elements.pageSize.value === "a4" ? 210 / 297 : (elements.pageSize.value === "legal" ? 8.5 / 14 : 8.5 / 11);
     let guideWidth = width * .8;
     let guideHeight = guideWidth / pageRatio;
-    if (guideHeight > height * .86) {
-      guideHeight = height * .86;
+    if (guideHeight > height * .78) {
+      guideHeight = height * .78;
       guideWidth = guideHeight * pageRatio;
     }
     const left = (width - guideWidth) / 2;
-    const top = (height - guideHeight) / 2;
+    const top = (height - guideHeight) * .3;
     const toVideoPoint = function (x, y) {
       return { x: (x - offsetX) / renderedWidth, y: (y - offsetY) / renderedHeight };
     };
