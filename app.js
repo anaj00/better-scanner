@@ -516,7 +516,8 @@
     if (activeGuideCorner < 0 || !customGuideCorners) return;
     var candidate = customGuideCorners.map(function (point) { return { x: point.x, y: point.y }; });
     var pt = guidePointFromEvent(event);
-    pt.y = Math.min(pt.y, .86);
+    pt.x = Math.max(.04, Math.min(pt.x, .96));
+    pt.y = Math.max(.04, Math.min(pt.y, .78));
     candidate[activeGuideCorner] = pt;
     if (ScannerGeometry.validateQuad(candidate)) customGuideCorners = candidate;
     drawGuide();
@@ -537,8 +538,8 @@
     const pageRatio = elements.pageSize.value === "a4" ? 210 / 297 : (elements.pageSize.value === "legal" ? 8.5 / 14 : 8.5 / 11);
     let guideWidth = width * .8;
     let guideHeight = guideWidth / pageRatio;
-    if (guideHeight > height * .78) {
-      guideHeight = height * .78;
+    if (guideHeight > height * .70) {
+      guideHeight = height * .70;
       guideWidth = guideHeight * pageRatio;
     }
     const left = (width - guideWidth) / 2;
@@ -1294,7 +1295,7 @@
   elements.outline.addEventListener("pointermove", moveGuideCorner);
   elements.outline.addEventListener("pointerup", endGuideDrag);
   elements.outline.addEventListener("pointercancel", endGuideDrag);
-  elements.edgeDetection.addEventListener("change", function () { if (elements.edgeDetection.checked) { elements.outline.style.touchAction = "none"; elements.outline.style.pointerEvents = "none"; } else { elements.outline.style.touchAction = "none"; elements.outline.style.pointerEvents = "auto"; drawGuide(); } });
+  elements.edgeDetection.addEventListener("change", function () { if (elements.edgeDetection.checked) { elements.outline.style.touchAction = "none"; elements.outline.style.pointerEvents = "none"; elements.outline.style.zIndex = ""; } else { elements.outline.style.touchAction = "none"; elements.outline.style.pointerEvents = "auto"; elements.outline.style.zIndex = "5"; drawGuide(); } });
   elements.filmstrip.addEventListener("click", function (event) { const pageButton = event.target.closest("[data-page-id]"); if (pageButton) openPageEditor(pageButton.dataset.pageId, "scanner"); });
   elements.captureFeedbackUndo.addEventListener("click", undoPage);
   elements.flaggedList.addEventListener("click", function (event) { const pageButton = event.target.closest("[data-page-id]"); if (pageButton) openPageEditor(pageButton.dataset.pageId, "flagged-review"); });
