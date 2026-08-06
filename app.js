@@ -543,7 +543,7 @@
       guideWidth = guideHeight * pageRatio;
     }
     const left = (width - guideWidth) / 2;
-    const top = (height - guideHeight) * .3;
+    const top = (height - guideHeight) * .22;
     const toVideoPoint = function (x, y) {
       return { x: (x - offsetX) / renderedWidth, y: (y - offsetY) / renderedHeight };
     };
