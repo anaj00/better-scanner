@@ -492,7 +492,7 @@
     context.setLineDash([]);
     points.forEach(function (point) {
       context.beginPath();
-      context.arc(point.x, point.y, 14 * (window.devicePixelRatio || 1), 0, Math.PI * 2);
+      context.arc(point.x, point.y, 22 * (window.devicePixelRatio || 1), 0, Math.PI * 2);
       context.fillStyle = "#d7f770";
       context.fill();
       context.strokeStyle = "#111714";
@@ -509,7 +509,7 @@
     var corners = customGuideCorners || pageGuideCorners();
     var nearest = corners.map(function (corner) { return Math.hypot(corner.x - point.x, corner.y - point.y); });
     var index = nearest.indexOf(Math.min.apply(null, nearest));
-    if (nearest[index] < .12) { activeGuideCorner = index; if (!customGuideCorners) customGuideCorners = pageGuideCorners(); elements.outline.setPointerCapture(event.pointerId); }
+    if (nearest[index] < .14) { activeGuideCorner = index; if (!customGuideCorners) customGuideCorners = pageGuideCorners(); elements.outline.setPointerCapture(event.pointerId); }
   }
 
   function moveGuideCorner(event) {
