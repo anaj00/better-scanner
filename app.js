@@ -110,6 +110,8 @@
   let processingReadyTimer;
   let stillImageCapture = null;
   let cameraReadyAt = 0;
+  let customGuideCorners = null;
+  let activeGuideCorner = -1;
 
   const processCanvas = document.createElement("canvas");
   const sourceCanvas = document.createElement("canvas");
@@ -251,6 +253,7 @@
     requiresPageChange = false;
     elements.flashButton.disabled = true;
     elements.flashButton.textContent = "Flash";
+    customGuideCorners = null;
     closeMenu();
   }
 
@@ -445,6 +448,80 @@
     context.setLineDash([]);
   }
 
+  function guidePointFromEvent(event) {
+    resizeOverlay();
+    var rect = elements.outline.getBoundingClientRect();
+    var ratio = window.devicePixelRatio || 1;
+    var width = elements.outline.width;
+    var height = elements.outline.height;
+    var sx = (event.clientX - rect.left) * ratio;
+    var sy = (event.clientY - rect.top) * ratio;
+    var videoRatio = elements.video.videoWidth / elements.video.videoHeight;
+    var frameRatio = width / height;
+    var renderedWidth = videoRatio > frameRatio ? height * videoRatio : width;
+    var renderedHeight = videoRatio > frameRatio ? height : width / videoRatio;
+    var offsetX = (width - renderedWidth) / 2;
+    var offsetY = (height - renderedHeight) / 2;
+    return { x: (sx - offsetX) / renderedWidth, y: (sy - offsetY) / renderedHeight };
+  }
+
+  function drawGuide() {
+    var corners = customGuideCorners || pageGuideCorners();
+    resizeOverlay();
+    var context = elements.outline.getContext("2d");
+    var width = elements.outline.width;
+    var height = elements.outline.height;
+    context.clearRect(0, 0, width, height);
+    var videoRatio = elements.video.videoWidth / elements.video.videoHeight;
+    var frameRatio = width / height;
+    var renderedWidth = videoRatio > frameRatio ? height * videoRatio : width;
+    var renderedHeight = videoRatio > frameRatio ? height : width / videoRatio;
+    var offsetX = (width - renderedWidth) / 2;
+    var offsetY = (height - renderedHeight) / 2;
+    var points = corners.map(function (point) { return { x: offsetX + point.x * renderedWidth, y: offsetY + point.y * renderedHeight }; });
+    context.beginPath();
+    points.forEach(function (point, index) { index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y); });
+    context.closePath();
+    context.lineWidth = Math.max(3, width * .007);
+    context.strokeStyle = "rgba(255, 255, 255, .72)";
+    context.setLineDash([width * .035, width * .025]);
+    context.shadowColor = "rgba(0, 0, 0, .55)";
+    context.shadowBlur = 8;
+    context.stroke();
+    context.shadowBlur = 0;
+    context.setLineDash([]);
+    points.forEach(function (point) {
+      context.beginPath();
+      context.arc(point.x, point.y, 14 * (window.devicePixelRatio || 1), 0, Math.PI * 2);
+      context.fillStyle = "#d7f770";
+      context.fill();
+      context.strokeStyle = "#111714";
+      context.lineWidth = 3 * (window.devicePixelRatio || 1);
+      context.setLineDash([]);
+      context.stroke();
+    });
+    currentCorners = customGuideCorners || pageGuideCorners();
+  }
+
+  function beginGuideDrag(event) {
+    if (elements.edgeDetection.checked) return;
+    var point = guidePointFromEvent(event);
+    var corners = customGuideCorners || pageGuideCorners();
+    var nearest = corners.map(function (corner) { return Math.hypot(corner.x - point.x, corner.y - point.y); });
+    var index = nearest.indexOf(Math.min.apply(null, nearest));
+    if (nearest[index] < .12) { activeGuideCorner = index; if (!customGuideCorners) customGuideCorners = pageGuideCorners(); elements.outline.setPointerCapture(event.pointerId); }
+  }
+
+  function moveGuideCorner(event) {
+    if (activeGuideCorner < 0 || !customGuideCorners) return;
+    var candidate = customGuideCorners.map(function (point) { return { x: point.x, y: point.y }; });
+    candidate[activeGuideCorner] = guidePointFromEvent(event);
+    if (ScannerGeometry.validateQuad(candidate)) customGuideCorners = candidate;
+    drawGuide();
+  }
+
+  function endGuideDrag() { activeGuideCorner = -1; }
+
   function pageGuideCorners() {
     resizeOverlay();
     const width = elements.outline.width;
@@ -571,12 +648,11 @@
     if (!videoWidth || !videoHeight) return;
 
     if (!elements.edgeDetection.checked) {
-      currentCorners = pageGuideCorners();
-      drawOutline(currentCorners, false, true);
+      drawGuide();
       stableCorners = [];
       stableSince = 0;
       if (requiresPageChange && Date.now() - lastPageSeenAt > PAGE_REMOVED_DELAY) { requiresPageChange = false; elements.manualCapture.disabled = false; elements.status.textContent = "Ready for the next page."; }
-      else if (!requiresPageChange) { elements.status.textContent = "Align it to the dashed " + guideLabel() + " guide."; }
+      else if (!requiresPageChange) { elements.status.textContent = "Drag the corners to set the capture area."; }
       return;
     }
     const scale = Math.min(1, PROCESSING_WIDTH / videoWidth);
@@ -1212,6 +1288,11 @@
   elements.reviewCanvas.addEventListener("pointermove", moveCorner);
   elements.reviewCanvas.addEventListener("pointerup", endCornerDrag);
   elements.reviewCanvas.addEventListener("pointercancel", endCornerDrag);
+  elements.outline.addEventListener("pointerdown", beginGuideDrag);
+  elements.outline.addEventListener("pointermove", moveGuideCorner);
+  elements.outline.addEventListener("pointerup", endGuideDrag);
+  elements.outline.addEventListener("pointercancel", endGuideDrag);
+  elements.edgeDetection.addEventListener("change", function () { if (elements.edgeDetection.checked) { elements.outline.style.touchAction = "none"; elements.outline.style.pointerEvents = "none"; } else { elements.outline.style.touchAction = "none"; elements.outline.style.pointerEvents = "auto"; drawGuide(); } });
   elements.filmstrip.addEventListener("click", function (event) { const pageButton = event.target.closest("[data-page-id]"); if (pageButton) openPageEditor(pageButton.dataset.pageId, "scanner"); });
   elements.captureFeedbackUndo.addEventListener("click", undoPage);
   elements.flaggedList.addEventListener("click", function (event) { const pageButton = event.target.closest("[data-page-id]"); if (pageButton) openPageEditor(pageButton.dataset.pageId, "flagged-review"); });
