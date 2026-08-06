@@ -112,7 +112,7 @@
   let stillImageCapture = null;
   let cameraReadyAt = 0;
   let customGuideCorners = null;
-  let activeGuideCorner = -1;
+  try { var saved = localStorage.getItem("scanner-crop-corners"); if (saved) { var parsed = JSON.parse(saved); if (parsed && parsed.length === 4 && parsed.every(function (p) { return typeof p.x === "number" && typeof p.y === "number"; })) customGuideCorners = parsed; } } catch (e) { /* ignore */ }
 
   const processCanvas = document.createElement("canvas");
   const sourceCanvas = document.createElement("canvas");
@@ -254,7 +254,6 @@
     requiresPageChange = false;
     elements.flashButton.disabled = true;
     elements.flashButton.textContent = "Flash";
-    customGuideCorners = null;
     closeMenu();
   }
 
@@ -449,23 +448,6 @@
     context.setLineDash([]);
   }
 
-  function guidePointFromEvent(event) {
-    resizeOverlay();
-    var rect = elements.outline.getBoundingClientRect();
-    var ratio = window.devicePixelRatio || 1;
-    var width = elements.outline.width;
-    var height = elements.outline.height;
-    var sx = (event.clientX - rect.left) * ratio;
-    var sy = (event.clientY - rect.top) * ratio;
-    var videoRatio = elements.video.videoWidth / elements.video.videoHeight;
-    var frameRatio = width / height;
-    var renderedWidth = videoRatio > frameRatio ? height * videoRatio : width;
-    var renderedHeight = videoRatio > frameRatio ? height : width / videoRatio;
-    var offsetX = (width - renderedWidth) / 2;
-    var offsetY = (height - renderedHeight) / 2;
-    return { x: (sx - offsetX) / renderedWidth, y: (sy - offsetY) / renderedHeight };
-  }
-
   function drawGuide() {
     var corners = customGuideCorners || pageGuideCorners();
     resizeOverlay();
@@ -499,28 +481,6 @@
     });
     currentCorners = customGuideCorners || pageGuideCorners();
   }
-
-  function beginGuideDrag(event) {
-    if (elements.edgeDetection.checked) return;
-    var point = guidePointFromEvent(event);
-    var corners = customGuideCorners || pageGuideCorners();
-    var nearest = corners.map(function (corner) { return Math.hypot(corner.x - point.x, corner.y - point.y); });
-    var index = nearest.indexOf(Math.min.apply(null, nearest));
-    if (nearest[index] < .14) { activeGuideCorner = index; if (!customGuideCorners) customGuideCorners = pageGuideCorners(); elements.outline.setPointerCapture(event.pointerId); }
-  }
-
-  function moveGuideCorner(event) {
-    if (activeGuideCorner < 0 || !customGuideCorners) return;
-    var candidate = customGuideCorners.map(function (point) { return { x: point.x, y: point.y }; });
-    var pt = guidePointFromEvent(event);
-    pt.x = Math.max(.04, Math.min(pt.x, .96));
-    pt.y = Math.max(.04, Math.min(pt.y, .78));
-    candidate[activeGuideCorner] = pt;
-    if (ScannerGeometry.validateQuad(candidate)) customGuideCorners = candidate;
-    drawGuide();
-  }
-
-  function endGuideDrag() { activeGuideCorner = -1; }
 
   function openCropSetup() {
     if (!stream || isCapturing) return;
@@ -1009,6 +969,7 @@
     var corners = reviewPoints().map(function (point) { return { x: point.x, y: point.y }; });
     if (page.cropSetup) {
       customGuideCorners = corners;
+      try { localStorage.setItem("scanner-crop-corners", JSON.stringify(corners)); } catch (e) { /* quota exceeded */ }
       removePageById(reviewPageId);
       cleanupReview();
       reviewPageId = null;
@@ -1327,7 +1288,7 @@
   elements.reviewCanvas.addEventListener("pointermove", moveCorner);
   elements.reviewCanvas.addEventListener("pointerup", endCornerDrag);
   elements.reviewCanvas.addEventListener("pointercancel", endCornerDrag);
-  elements.edgeDetection.addEventListener("change", function () { elements.setCrop.hidden = elements.edgeDetection.checked; if (!elements.edgeDetection.checked) drawGuide(); });
+  elements.edgeDetection.addEventListener("change", function () { elements.setCrop.hidden = elements.edgeDetection.checked; if (!elements.edgeDetection.checked) drawGuide(); else { customGuideCorners = null; try { localStorage.removeItem("scanner-crop-corners"); } catch (e) {} } });
   elements.filmstrip.addEventListener("click", function (event) { const pageButton = event.target.closest("[data-page-id]"); if (pageButton) openPageEditor(pageButton.dataset.pageId, "scanner"); });
   elements.captureFeedbackUndo.addEventListener("click", undoPage);
   elements.flaggedList.addEventListener("click", function (event) { const pageButton = event.target.closest("[data-page-id]"); if (pageButton) openPageEditor(pageButton.dataset.pageId, "flagged-review"); });
