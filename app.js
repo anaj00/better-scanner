@@ -345,8 +345,8 @@
         audio: false,
         video: {
           facingMode: { ideal: cameraFacing },
-          width: { ideal: 3840 },
-          height: { ideal: 2160 }
+          width: { ideal: 4096 },
+          height: { ideal: 3072 }
         }
       };
       const openedStream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -730,7 +730,7 @@
         } finally { if (source.close) source.close(); }
       } catch (error) { stillImageCapture = null; /* Use the current video frame below. */ }
     }
-    const fallbackScale = Math.min(1, 2400 / Math.max(previewWidth, previewHeight), Math.sqrt(4000000 / (previewWidth * previewHeight))); sourceCanvas.width = Math.round(previewWidth * fallbackScale); sourceCanvas.height = Math.round(previewHeight * fallbackScale); sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(elements.video, 0, 0, sourceCanvas.width, sourceCanvas.height);
+    const fallbackScale = Math.min(1, 4096 / Math.max(previewWidth, previewHeight), Math.sqrt(12000000 / (previewWidth * previewHeight))); sourceCanvas.width = Math.round(previewWidth * fallbackScale); sourceCanvas.height = Math.round(previewHeight * fallbackScale); sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(elements.video, 0, 0, sourceCanvas.width, sourceCanvas.height);
     return { blob: await canvasToBlob(sourceCanvas, "image/jpeg", .95), corners: corners, width: sourceCanvas.width, height: sourceCanvas.height };
   }
 
@@ -792,10 +792,10 @@
       page.sourceWidth = source.width; page.sourceHeight = source.height;
       const corners = page.cornersAreStill ? page.finalCorners : mapPreviewCornersToStill(page.finalCorners, page.previewWidth, page.previewHeight, source.width, source.height);
       page.finalCorners = corners; page.cornersAreStill = true;
-      const memory = navigator.deviceMemory || 4; const maximumInput = memory <= 2 ? 2200 : 3000; const maximumInputPixels = memory <= 2 ? 4000000 : 8000000; const scale = Math.min(1, maximumInput / Math.max(source.width, source.height), Math.sqrt(maximumInputPixels / (source.width * source.height)));
+      const memory = navigator.deviceMemory || 4; const maximumInput = memory <= 2 ? 2800 : 3600; const maximumInputPixels = memory <= 2 ? 6000000 : 12000000; const scale = Math.min(1, maximumInput / Math.max(source.width, source.height), Math.sqrt(maximumInputPixels / (source.width * source.height)));
       const canvas = document.createElement("canvas"); canvas.width = Math.round(source.width * scale); canvas.height = Math.round(source.height * scale); const context = canvas.getContext("2d", { willReadFrequently: true }); context.drawImage(source, 0, 0, canvas.width, canvas.height); const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
       page.timings.sourcePreservationMs = performance.now() - started;
-      processingWorker.postMessage({ type: "process", pageId: page.id, revision: page.revision, generation: job.generation, width: canvas.width, height: canvas.height, buffer: imageData.data.buffer, corners: corners, rotation: page.rotation || 0, mode: page.scanMode, maximumDimension: memory <= 2 ? 1800 : 2200, maximumPixels: memory <= 2 ? 3000000 : 4000000 }, [imageData.data.buffer]);
+      processingWorker.postMessage({ type: "process", pageId: page.id, revision: page.revision, generation: job.generation, width: canvas.width, height: canvas.height, buffer: imageData.data.buffer, corners: corners, rotation: page.rotation || 0, mode: page.scanMode, maximumDimension: memory <= 2 ? 2400 : 3000, maximumPixels: memory <= 2 ? 5000000 : 8000000 }, [imageData.data.buffer]);
       canvas.width = 0; canvas.height = 0;
     } finally { if (source.close) source.close(); }
   }
