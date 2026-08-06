@@ -1295,7 +1295,7 @@
   elements.outline.addEventListener("pointermove", moveGuideCorner);
   elements.outline.addEventListener("pointerup", endGuideDrag);
   elements.outline.addEventListener("pointercancel", endGuideDrag);
-  elements.edgeDetection.addEventListener("change", function () { if (elements.edgeDetection.checked) { elements.outline.style.touchAction = "none"; elements.outline.style.pointerEvents = "none"; elements.outline.style.zIndex = ""; } else { elements.outline.style.touchAction = "none"; elements.outline.style.pointerEvents = "auto"; elements.outline.style.zIndex = "5"; drawGuide(); } });
+  elements.edgeDetection.addEventListener("change", function () { if (elements.edgeDetection.checked) { elements.outline.style.touchAction = "none"; elements.outline.style.pointerEvents = "none"; elements.outline.style.zIndex = ""; } else { elements.outline.style.touchAction = "none"; elements.outline.style.pointerEvents = "auto"; elements.outline.style.zIndex = "3"; drawGuide(); } });
   elements.filmstrip.addEventListener("click", function (event) { const pageButton = event.target.closest("[data-page-id]"); if (pageButton) openPageEditor(pageButton.dataset.pageId, "scanner"); });
   elements.captureFeedbackUndo.addEventListener("click", undoPage);
   elements.flaggedList.addEventListener("click", function (event) { const pageButton = event.target.closest("[data-page-id]"); if (pageButton) openPageEditor(pageButton.dataset.pageId, "flagged-review"); });
