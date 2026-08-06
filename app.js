@@ -898,8 +898,8 @@
 
   function processBlackAndWhite(warped, mats) {
     const gray = new cv.Mat(); const small = new cv.Mat(); const smallBackground = new cv.Mat(); const background = new cv.Mat(); const normalized = new cv.Mat(); const denoised = new cv.Mat(); const binary = new cv.Mat(); const output = new cv.Mat(); mats.push(gray, small, smallBackground, background, normalized, denoised, binary, output);
-    cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); const illuminationScale = Math.min(1, 256 / Math.max(gray.cols, gray.rows)); const illuminationSize = new cv.Size(Math.max(1, Math.round(gray.cols * illuminationScale)), Math.max(1, Math.round(gray.rows * illuminationScale))); cv.resize(gray, small, illuminationSize, 0, 0, cv.INTER_AREA); cv.GaussianBlur(small, smallBackground, new cv.Size(15, 15), 0); cv.resize(smallBackground, background, new cv.Size(gray.cols, gray.rows), 0, 0, cv.INTER_LINEAR); cv.divide(gray, background, normalized, 250); cv.medianBlur(normalized, denoised, 3);
-    cv.adaptiveThreshold(denoised, binary, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 61, 15); cv.addWeighted(denoised, .25, binary, .75, 0, output); return output;
+    cv.cvtColor(warped, gray, cv.COLOR_RGBA2GRAY); const illuminationScale = Math.min(1, 256 / Math.max(gray.cols, gray.rows)); const illuminationSize = new cv.Size(Math.max(1, Math.round(gray.cols * illuminationScale)), Math.max(1, Math.round(gray.rows * illuminationScale))); cv.resize(gray, small, illuminationSize, 0, 0, cv.INTER_AREA); cv.GaussianBlur(small, smallBackground, new cv.Size(15, 15), 0); cv.resize(smallBackground, background, new cv.Size(gray.cols, gray.rows), 0, 0, cv.INTER_LINEAR); cv.divide(gray, background, normalized, 230); cv.GaussianBlur(normalized, denoised, new cv.Size(3, 3), 0);
+    cv.adaptiveThreshold(denoised, binary, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 41, 14); cv.addWeighted(denoised, .3, binary, .7, 0, output); return output;
   }
 
   function reviewPointFromEvent(event) {
