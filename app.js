@@ -66,7 +66,8 @@
     deletePage: document.querySelector("#delete-page-button"),
     flaggedList: document.querySelector("#flagged-list"),
     reviewFlagged: document.querySelector("#review-flagged-button"),
-    continueAnyway: document.querySelector("#continue-anyway-button")
+    continueAnyway: document.querySelector("#continue-anyway-button"),
+    setCrop: document.querySelector("#set-crop-button")
   };
 
   let stream;
@@ -492,13 +493,9 @@
     context.setLineDash([]);
     points.forEach(function (point) {
       context.beginPath();
-      context.arc(point.x, point.y, 22 * (window.devicePixelRatio || 1), 0, Math.PI * 2);
-      context.fillStyle = "#d7f770";
+      context.arc(point.x, point.y, 5 * (window.devicePixelRatio || 1), 0, Math.PI * 2);
+      context.fillStyle = "rgba(255, 255, 255, .85)";
       context.fill();
-      context.strokeStyle = "#111714";
-      context.lineWidth = 3 * (window.devicePixelRatio || 1);
-      context.setLineDash([]);
-      context.stroke();
     });
     currentCorners = customGuideCorners || pageGuideCorners();
   }
@@ -524,6 +521,28 @@
   }
 
   function endGuideDrag() { activeGuideCorner = -1; }
+
+  function openCropSetup() {
+    if (!stream || isCapturing) return;
+    var canvas = document.createElement("canvas");
+    canvas.width = elements.video.videoWidth;
+    canvas.height = elements.video.videoHeight;
+    canvas.getContext("2d").drawImage(elements.video, 0, 0);
+    canvasToBlob(canvas, "image/jpeg", .92).then(function (blob) {
+      var corners = (customGuideCorners || pageGuideCorners()).map(function (p) { return { x: p.x, y: p.y }; });
+      var page = {
+        id: makeId(), revision: 1, originalImage: blob,
+        detectedCorners: null, refinedCorners: null,
+        finalCorners: corners, cornersAreStill: true,
+        detectionConfidence: 0, refinementConfidence: 0,
+        cropStatus: "accepted", qualityWarnings: [], rotation: 0,
+        scanMode: elements.scanMode.value, cropSetup: true
+      };
+      documentGroups[documentGroups.length - 1].push(page);
+      elements.reviewTitle.textContent = "Set crop area";
+      openPageEditor(page.id, "scanner");
+    });
+  }
 
   function pageGuideCorners() {
     resizeOverlay();
@@ -987,7 +1006,19 @@
     if (!pendingCapture || !reviewPageId) return;
     reviewGeneration += 1;
     const page = findPage(reviewPageId); if (!page) return;
-    page.finalCorners = reviewPoints().map(function (point) { return { x: point.x, y: point.y }; }); page.cornersAreStill = true; page.rotation = reviewRotation; page.scanMode = elements.reviewMode.value; page.cropStatus = "accepted"; page.cropManuallyAccepted = true; page.qualityWarnings = []; page.status = "captured"; page.revision += 1; page.processingAttempts = 0; page.processedImage = null;
+    var corners = reviewPoints().map(function (point) { return { x: point.x, y: point.y }; });
+    if (page.cropSetup) {
+      customGuideCorners = corners;
+      removePageById(reviewPageId);
+      cleanupReview();
+      reviewPageId = null;
+      closeMenu();
+      setScreen("scanner");
+      drawGuide();
+      showToast("Crop area saved.");
+      return;
+    }
+    page.finalCorners = corners; page.cornersAreStill = true; page.rotation = reviewRotation; page.scanMode = elements.reviewMode.value; page.cropStatus = "accepted"; page.cropManuallyAccepted = true; page.qualityWarnings = []; page.status = "captured"; page.revision += 1; page.processingAttempts = 0; page.processedImage = null;
     processingQueue = processingQueue.filter(function (job) { return job.pageId !== page.id; }); processingQueue.push({ pageId: page.id, revision: page.revision, generation: sessionGeneration });
     cleanupReview();
     renderFilmstrip(); pumpProcessingQueue();
@@ -1000,13 +1031,18 @@
     reviewGeneration += 1;
     if (reviewPageId) removePageById(reviewPageId);
     cleanupReview();
-    reviewPageId = null; finishing = false; requiresPageChange = false; if (stream) { elements.manualCapture.disabled = false; setScreen("scanner"); } else startCamera();
+    reviewPageId = null; finishing = false; requiresPageChange = false;
+    if (stream) { elements.manualCapture.disabled = false; closeMenu(); setScreen("scanner"); }
+    else startCamera();
     stableCorners = []; stableSince = 0;
   }
 
   function deleteReviewedPage() {
-    if (!reviewPageId) return; const returnPhase = reviewReturnPhase; removePageById(reviewPageId); reviewPageId = null; cleanupReview();
-    if (returnPhase === "flagged-review") openNextFlaggedPage(); else setScreen(stream ? "scanner" : "welcome");
+    if (!reviewPageId) return;
+    var page = findPage(reviewPageId);
+    removePageById(reviewPageId); reviewPageId = null; cleanupReview();
+    if (page && page.cropSetup) { setScreen("scanner"); closeMenu(); drawGuide(); return; }
+    if (reviewReturnPhase === "flagged-review") openNextFlaggedPage(); else setScreen(stream ? "scanner" : "welcome");
   }
 
   function removePageById(pageId) {
@@ -1291,16 +1327,13 @@
   elements.reviewCanvas.addEventListener("pointermove", moveCorner);
   elements.reviewCanvas.addEventListener("pointerup", endCornerDrag);
   elements.reviewCanvas.addEventListener("pointercancel", endCornerDrag);
-  elements.outline.addEventListener("pointerdown", beginGuideDrag);
-  elements.outline.addEventListener("pointermove", moveGuideCorner);
-  elements.outline.addEventListener("pointerup", endGuideDrag);
-  elements.outline.addEventListener("pointercancel", endGuideDrag);
-  elements.edgeDetection.addEventListener("change", function () { if (elements.edgeDetection.checked) { elements.outline.style.touchAction = "none"; elements.outline.style.pointerEvents = "none"; elements.outline.style.zIndex = ""; } else { elements.outline.style.touchAction = "none"; elements.outline.style.pointerEvents = "auto";     elements.outline.style.zIndex = "1"; drawGuide(); } });
+  elements.edgeDetection.addEventListener("change", function () { elements.setCrop.hidden = elements.edgeDetection.checked; if (!elements.edgeDetection.checked) drawGuide(); });
   elements.filmstrip.addEventListener("click", function (event) { const pageButton = event.target.closest("[data-page-id]"); if (pageButton) openPageEditor(pageButton.dataset.pageId, "scanner"); });
   elements.captureFeedbackUndo.addEventListener("click", undoPage);
   elements.flaggedList.addEventListener("click", function (event) { const pageButton = event.target.closest("[data-page-id]"); if (pageButton) openPageEditor(pageButton.dataset.pageId, "flagged-review"); });
   elements.reviewFlagged.addEventListener("click", startFlaggedReview);
   elements.continueAnyway.addEventListener("click", continueAnyway);
+  elements.setCrop.addEventListener("click", function () { closeMenu(); openCropSetup(); });
   window.addEventListener("resize", function () { if (!elements.review.hidden) drawReview(); });
   elements.menuButton.addEventListener("click", openMenu);
   elements.closeMenu.addEventListener("click", closeMenu);
