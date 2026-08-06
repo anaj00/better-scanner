@@ -345,7 +345,7 @@
         audio: false,
         video: {
           facingMode: { ideal: cameraFacing },
-          width: { ideal: 4096 },
+          width: { ideal: 4096, min: 1920 },
           height: { ideal: 3072 }
         }
       };
@@ -722,7 +722,17 @@
     if (!stillImageCapture && window.ImageCapture && track) { try { stillImageCapture = new ImageCapture(track); } catch (error) { stillImageCapture = null; } }
     if (stillImageCapture) {
       try {
-        const blob = await stillImageCapture.takePhoto(); restoreTorchAfterPhoto(track); const source = await decodeBlobToSource(blob);
+        var photoSettings = {};
+        try {
+          var caps = await stillImageCapture.getPhotoCapabilities();
+          if (caps) {
+            photoSettings.imageWidth = caps.imageWidth ? caps.imageWidth.max : undefined;
+            photoSettings.imageHeight = caps.imageHeight ? caps.imageHeight.max : undefined;
+          }
+        } catch (e) { /* Use defaults. */ }
+        try { if (track.applyConstraints) await track.applyConstraints({ advanced: [{ focusMode: "auto" }] }); } catch (e) {}
+        await new Promise(function (resolve) { setTimeout(resolve, 150); });
+        var blob = await stillImageCapture.takePhoto(photoSettings); restoreTorchAfterPhoto(track); var source = await decodeBlobToSource(blob);
         try {
           const mappedCorners = mapPreviewCornersToStill(corners, previewWidth, previewHeight, source.width, source.height); const scale = Math.min(1, 4096 / Math.max(source.width, source.height), Math.sqrt(12000000 / (source.width * source.height)));
           sourceCanvas.width = Math.round(source.width * scale); sourceCanvas.height = Math.round(source.height * scale); sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(source, 0, 0, sourceCanvas.width, sourceCanvas.height);
@@ -731,7 +741,7 @@
       } catch (error) { stillImageCapture = null; /* Use the current video frame below. */ }
     }
     const fallbackScale = Math.min(1, 4096 / Math.max(previewWidth, previewHeight), Math.sqrt(12000000 / (previewWidth * previewHeight))); sourceCanvas.width = Math.round(previewWidth * fallbackScale); sourceCanvas.height = Math.round(previewHeight * fallbackScale); sourceCanvas.getContext("2d", { willReadFrequently: true }).drawImage(elements.video, 0, 0, sourceCanvas.width, sourceCanvas.height);
-    return { blob: await canvasToBlob(sourceCanvas, "image/jpeg", .95), corners: corners, width: sourceCanvas.width, height: sourceCanvas.height };
+    return { blob: await canvasToBlob(sourceCanvas, "image/jpeg", .98), corners: corners, width: sourceCanvas.width, height: sourceCanvas.height };
   }
 
   async function createCaptureThumbnail(page, corners) {
@@ -747,7 +757,8 @@
     isCapturing = true;
     elements.status.textContent = "Taking photo...";
     const started = performance.now(); const captureSessionId = cameraSessionId; const targetGroup = currentGroup();
-    const chosenCorners = corners && ScannerGeometry.validateQuad(corners) ? corners.map(function (point) { return { x: point.x, y: point.y }; }) : pageGuideCorners();
+    const isGuideMode = !elements.edgeDetection.checked && customGuideCorners;
+    const chosenCorners = isGuideMode ? customGuideCorners.map(function (point) { return { x: point.x, y: point.y }; }) : (corners && ScannerGeometry.validateQuad(corners) ? corners.map(function (point) { return { x: point.x, y: point.y }; }) : pageGuideCorners());
     try {
       const captured = await captureSourceFrame(chosenCorners); if (captureSessionId !== cameraSessionId) return;
       const page = { id: makeId(), revision: 1, sequence: pageSequence += 1, createdAt: started, originalImage: captured.blob, detectedCorners: captured.corners, refinedCorners: null, finalCorners: captured.corners, cornersAreStill: true, detectionConfidence: 1, refinementConfidence: 0, cropStatus: "accepted", qualityWarnings: [], processedImage: null, processedMimeType: null, processedWidth: 0, processedHeight: 0, rotation: 0, scanMode: elements.scanMode.value, status: "captured", previewWidth: captured.width, previewHeight: captured.height, sourceWidth: captured.width, sourceHeight: captured.height, thumbnailBlob: null, thumbnailUrl: null, processingAttempts: 0, timings: { stillCaptureMs: performance.now() - started }, cancelled: false };
@@ -1054,8 +1065,9 @@
   function manualCapture() {
     if (requiresPageChange) { showToast("Move the current page away before capturing the next one."); return; }
     if (performance.now() < cameraReadyAt) { showToast("Give the camera a moment to focus."); return; }
+    if (!elements.edgeDetection.checked && customGuideCorners) { captureCurrentPage(customGuideCorners); return; }
     if (!currentCorners) showToast("Using the Legal guide. Keep the page inside its dashed border.");
-    captureCurrentPage(currentCorners || pageGuideCorners(), "manual");
+    captureCurrentPage(currentCorners || pageGuideCorners());
   }
 
   async function openCameraFile(file) {
